@@ -44,6 +44,11 @@ contextBridge.exposeInMainWorld('api', {
     return () => ipcRenderer.removeListener('update:state', listener)
   },
 
+  ttsSynth: text => invoke('tts:synth', text),
+  ttsVoices: cfg => invoke('tts:voices', cfg),
+  ttsStatus: cfg => invoke('tts:status', cfg),
+  ttsPickFile: kind => invoke('tts:pick-file', kind),
+
   aiModels: cfg => invoke('ai:models', cfg),
   aiChat: (reqId, payload) => invoke('ai:chat', reqId, payload),
   aiAbort: reqId => invoke('ai:abort', reqId),

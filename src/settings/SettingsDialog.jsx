@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Settings, Sparkles, Info, X, Eye, EyeOff, Keyboard } from 'lucide-react'
+import { Settings, Sparkles, Info, X, Eye, EyeOff, Keyboard, AudioLines } from 'lucide-react'
 import { useLib } from '../App.jsx'
-import { toast } from '../lib/ui.jsx'
+import { toast, promptDialog } from '../lib/ui.jsx'
 import { useUpdateState, updateText } from './update.jsx'
 
 // 常用服务商预设（除 Claude 外均为 OpenAI 兼容接口）
@@ -33,6 +33,7 @@ export default function SettingsDialog({ tab: initial, onClose }) {
             <div className="h">SETTINGS</div>
             <Nav id="general" icon={Settings}>通用</Nav>
             <Nav id="ai" icon={Sparkles}>AI 助手</Nav>
+            <Nav id="tts" icon={AudioLines}>朗读</Nav>
             <Nav id="keys" icon={Keyboard}>快捷键</Nav>
             <Nav id="about" icon={Info}>关于</Nav>
           </div>
@@ -40,6 +41,7 @@ export default function SettingsDialog({ tab: initial, onClose }) {
             <button className="modal-x settings-x" onClick={onClose}><X size={15} /></button>
             {tab === 'general' && <General />}
             {tab === 'ai' && <AI />}
+            {tab === 'tts' && <TTS />}
             {tab === 'keys' && <Keys />}
             {tab === 'about' && <About />}
           </div>
@@ -189,6 +191,150 @@ function AI() {
         <button className="btn btn-primary" onClick={save}>保存</button>
         {status && !status.busy && <span className={`status-line ${status.ok ? 'ok' : 'err'}`}>{status.text}</span>}
       </div>
+    </>
+  )
+}
+
+const SAMPLE = '他推开窗，晚风带着桂花的香气涌了进来。远处的灯火一盏一盏亮起，像是谁在夜色里撒了一把星星。'
+const errText = e => String(e.message || e).replace(/^Error invoking remote method '[^']+': (Error: )?/, '')
+
+function TTS() {
+  const lib = useLib()
+  const t = lib.settings.tts
+  const set = patch => lib.updateSettings({ tts: patch })
+  const [st, setSt] = useState(null)
+  const [voices, setVoices] = useState([])
+  const [sysVoices, setSysVoices] = useState(() => speechSynthesis.getVoices())
+  const [previewing, setPreviewing] = useState(false)
+
+  // 打开本页就启动 F5 服务、加载模型，试听和朗读时不用再等
+  useEffect(() => {
+    if (t.engine !== 'f5') return
+    let alive = true, timer
+    const poll = async () => {
+      const s = await window.api.ttsStatus()
+      if (!alive) return
+      setSt(s)
+      if (s.found && !s.error && !s.loaded) timer = setTimeout(poll, 1500)
+    }
+    setSt(null)
+    poll()
+    window.api.ttsVoices().then(v => alive && setVoices(v)).catch(() => {})
+    return () => { alive = false; clearTimeout(timer) }
+  }, [t.engine, t.f5Python])
+  useEffect(() => {
+    const on = () => setSysVoices(speechSynthesis.getVoices())
+    speechSynthesis.addEventListener('voiceschanged', on)
+    return () => speechSynthesis.removeEventListener('voiceschanged', on)
+  }, [])
+
+  const all = [...t.customVoices.map(v => ({ ...v, source: '我的' })), ...voices]
+  const current = all.find(v => v.refAudio === t.f5Voice?.refAudio) || all[0]
+  const pickVoice = refAudio => {
+    const v = all.find(x => x.refAudio === refAudio)
+    if (v) return set({ f5Voice: { name: v.name, refAudio: v.refAudio, refText: v.refText } })
+  }
+  const addVoice = async () => {
+    const file = await window.api.ttsPickFile('voice')
+    if (!file) return
+    const name = await promptDialog({ title: '给这个音色起个名字', placeholder: file.split(/[\\/]/).pop().replace(/\.[^.]+$/, ''), okText: '下一步' })
+      || file.split(/[\\/]/).pop().replace(/\.[^.]+$/, '')
+    const refText = await promptDialog({ title: '参考文本', message: '这段音频里说的原话。填写更准确；留空则自动识别（首次较慢）。', placeholder: '音频里说的话', okText: '添加' })
+    const v = { name, refAudio: file, refText: refText || '' }
+    await set({ customVoices: [...t.customVoices.filter(x => x.refAudio !== file), v], f5Voice: v })
+    toast(`已添加音色“${name}”`, 'success')
+  }
+  const removeVoice = () => set({ customVoices: t.customVoices.filter(v => v.refAudio !== current.refAudio), f5Voice: null })
+  const preview = async () => {
+    setPreviewing(true)
+    try {
+      if (t.engine === 'f5') {
+        if (current && t.f5Voice?.refAudio !== current.refAudio) await pickVoice(current.refAudio)
+        const data = await window.api.ttsSynth(SAMPLE)
+        const audio = new Audio(URL.createObjectURL(new Blob([data], { type: 'audio/wav' })))
+        audio.preservesPitch = true
+        audio.playbackRate = t.rate
+        await audio.play()
+      } else {
+        speechSynthesis.cancel()
+        const u = new SpeechSynthesisUtterance(SAMPLE)
+        u.rate = t.rate
+        const v = sysVoices.find(x => x.voiceURI === t.systemVoice)
+        if (v) u.voice = v
+        speechSynthesis.speak(u)
+      }
+    } catch (e) {
+      toast(errText(e), 'error')
+    }
+    setPreviewing(false)
+  }
+
+  const [cls, text] = !st ? ['', '正在启动…']
+    : !st.found ? ['err', '没有找到 F5-TTS 环境']
+    : st.error ? ['err', st.error]
+    : st.loaded ? ['ok', `已就绪 · ${st.device}`]
+    : ['', '正在加载模型…（首次约 20 秒）']
+
+  return (
+    <>
+      <div className="eyebrow">READ ALOUD</div>
+      <h2>朗读</h2>
+      <div className="set-hint">F5-TTS 是“静听”听书软件用的开源语音大模型，在本机显卡上运行，语气自然，还能克隆任意人声。</div>
+      <div className="set-card">
+        <div className="set-row">
+          <span className="k">语音引擎</span>
+          <div className="v">
+            <div className="seg">
+              {[['f5', 'F5-TTS 大模型'], ['system', '系统语音']].map(([v, l]) => (
+                <button key={v} className={t.engine === v ? 'active' : ''} onClick={() => set({ engine: v })}>{l}</button>
+              ))}
+            </div>
+            {t.engine === 'f5' && <span className={`status-line ${cls}`}>{text}</span>}
+          </div>
+        </div>
+        {t.engine === 'f5' ? (
+          <>
+            <div className="set-row">
+              <span className="k">音色</span>
+              <div className="v">
+                <select className="input" value={current?.refAudio || ''} onChange={e => pickVoice(e.target.value)}>
+                  {!all.length && <option value="">（暂无音色）</option>}
+                  {all.map(v => <option key={v.refAudio} value={v.refAudio}>{v.name}{v.source ? ` · ${v.source}` : ''}</option>)}
+                </select>
+                {current?.source === '我的' && <button className="btn btn-sm" onClick={removeVoice}>删除</button>}
+                <button className="btn btn-sm" onClick={addVoice}>克隆新音色…</button>
+              </div>
+            </div>
+            <div className="set-row">
+              <span className="k">Python 环境</span>
+              <div className="v">
+                <input className="input" readOnly value={t.f5Python || (st?.python ? `自动：${st.python}` : '自动检测（静听的 .venv）')} />
+                <button className="btn btn-sm" onClick={async () => { const p = await window.api.ttsPickFile('python'); if (p) set({ f5Python: p }) }}>选择…</button>
+                {t.f5Python && <button className="btn btn-sm" onClick={() => set({ f5Python: '' })}>自动</button>}
+              </div>
+            </div>
+          </>
+        ) : (
+          <div className="set-row">
+            <span className="k">系统音色</span>
+            <div className="v">
+              <select className="input" value={t.systemVoice} onChange={e => set({ systemVoice: e.target.value })}>
+                <option value="">自动（按书的语言）</option>
+                {sysVoices.map(v => <option key={v.voiceURI} value={v.voiceURI}>{v.name}</option>)}
+              </select>
+            </div>
+          </div>
+        )}
+        <div className="set-row">
+          <span className="k">语速</span>
+          <div className="v">
+            <input type="range" min={0.6} max={2} step={0.05} value={t.rate} onChange={e => set({ rate: +e.target.value })} style={{ flex: 1 }} />
+            <span className="tabular" style={{ width: 50, textAlign: 'right' }}>{t.rate.toFixed(2)}×</span>
+          </div>
+        </div>
+      </div>
+      <div className="set-hint">变速不变调，朗读中调整立即生效。克隆音色请选一段 5–15 秒、没有背景音乐的清晰人声。</div>
+      <button className="btn" onClick={preview} disabled={previewing || (t.engine === 'f5' && !current)}>{previewing ? '合成中…' : '试听'}</button>
     </>
   )
 }

@@ -43,6 +43,9 @@ export default function Reader({ book: record, onClose }) {
   const narrator = useRef(null)
   const isFixed = ['pdf', 'cbz'].includes(record.format)
   rsRef.current = rs
+  const ttsRef = useRef(lib.settings.tts)
+  ttsRef.current = lib.settings.tts
+  useEffect(() => { narrator.current?.setRate(lib.settings.tts.rate) }, [lib.settings.tts.rate])
 
   // ---------- 标注持久化 ----------
   const saveAnns = useCallback(list => {
@@ -402,6 +405,8 @@ export default function Reader({ book: record, onClose }) {
       narrator.current = new Narrator({
         getPageText,
         onState: setSpeaking,
+        getSettings: () => ttsRef.current,
+        onNotice: (msg, type) => toast(msg, type),
         nextPage: async () => {
           const before = locRef.current?.fraction
           if (before >= 0.999) return false
@@ -472,7 +477,8 @@ export default function Reader({ book: record, onClose }) {
             {pageBookmark ? <BookmarkCheck size={17} strokeWidth={1.75} /> : <Bookmark size={17} strokeWidth={1.75} />}
           </button>
           <button className={`icon-btn type-toggle ${typeOpen ? 'on' : ''}`} title="排版与主题" onClick={() => setTypeOpen(v => !v)}><Type size={17} strokeWidth={1.75} /></button>
-          <button className={`icon-btn ${speaking ? 'on' : ''}`} title={speaking ? '停止朗读' : '朗读'} onClick={toggleSpeak}>
+          <button className={`icon-btn ${speaking ? 'on' : ''}`} title={speaking ? '停止朗读' : '朗读（右键：音色与语速）'} onClick={toggleSpeak}
+            onContextMenu={e => { e.preventDefault(); lib.openSettings('tts') }}>
             {speaking ? <Square size={15} fill="currentColor" /> : <Volume2 size={17} strokeWidth={1.75} />}
           </button>
           <button className="icon-btn" title="全屏 (F11)" onClick={toggleFull}>{full ? <Minimize size={17} strokeWidth={1.75} /> : <Maximize size={17} strokeWidth={1.75} />}</button>

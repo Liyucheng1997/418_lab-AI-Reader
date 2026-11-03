@@ -22,6 +22,14 @@ const DEFAULT_SETTINGS = {
     justify: true,
     pdfZoom: 'fit-page',
   },
+  tts: {
+    engine: 'f5', // f5（F5-TTS 本地大模型，同静听）| system（系统语音）
+    rate: 1,
+    f5Python: '', // 留空自动使用静听的 Python 环境
+    f5Voice: null, // { name, refAudio, refText }，留空用第一个可用音色
+    customVoices: [], // 在本应用里克隆的音色
+    systemVoice: '',
+  },
   ai: {
     provider: 'anthropic',
     baseUrl: '',

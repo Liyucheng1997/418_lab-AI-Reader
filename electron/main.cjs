@@ -6,6 +6,7 @@ const { pathToFileURL } = require('url')
 const { Store, mergeDeep } = require('./store.cjs')
 const { streamChat, listModels } = require('./ai.cjs')
 const updater = require('./updater.cjs')
+const f5 = require('./tts.cjs')
 
 const SUPPORTED = ['epub', 'pdf', 'txt', 'mobi', 'azw3', 'azw', 'fb2', 'fbz', 'cbz']
 const DEV_URL = process.env.VITE_DEV_URL
@@ -265,6 +266,7 @@ function setupIpc() {
     store.data.settings = mergeDeep(store.data.settings, patch)
     store.save()
     if ('bossKey' in patch) registerBossKey()
+    if (patch.tts && 'f5Python' in patch.tts) f5.stop()
     if ('theme' in patch && win) {
       const dark = isDark()
       win.setTitleBarOverlay(overlayColors(dark))
@@ -305,6 +307,16 @@ function setupIpc() {
     }
   })
   h('ai:abort', reqId => aiJobs.get(reqId)?.abort())
+
+  h('tts:synth', text => f5.synth(store.data.settings.tts, text))
+  h('tts:voices', cfg => f5.voices(cfg || store.data.settings.tts))
+  h('tts:status', cfg => f5.status(cfg || store.data.settings.tts))
+  h('tts:pick-file', async kind => {
+    const res = await dialog.showOpenDialog(win, kind === 'python'
+      ? { title: '选择装有 F5-TTS 的 python.exe', properties: ['openFile'], filters: [{ name: 'Python', extensions: ['exe'] }] }
+      : { title: '选择一段 5–15 秒的清晰人声作为参考音色', properties: ['openFile'], filters: [{ name: '音频', extensions: ['wav', 'mp3', 'flac', 'ogg', 'm4a'] }] })
+    return res.canceled ? null : res.filePaths[0]
+  })
 }
 
 function setupProtocols() {
@@ -353,5 +365,5 @@ app.whenReady().then(() => {
   })
 })
 
-app.on('will-quit', () => { globalShortcut.unregisterAll(); store?.flush() })
+app.on('will-quit', () => { globalShortcut.unregisterAll(); f5.stop(); store?.flush() })
 app.on('window-all-closed', () => app.quit())

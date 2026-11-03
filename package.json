@@ -35,6 +35,9 @@
       "electron/**",
       "package.json"
     ],
+    "asarUnpack": [
+      "electron/f5_server.py"
+    ],
     "fileAssociations": [
       {
         "ext": "epub",
