@@ -38,4 +38,4 @@ console.log(`\n▶ 上传到 GitHub Releases`)
 const files = [`AI-Reader-Setup-${version}.exe`, `AI-Reader-Setup-${version}.exe.blockmap`, 'latest.yml'].map(f => `"release/${f}"`).join(' ')
 run(`gh release create ${tag} ${files} --title "${productName} ${version}" --notes-file release/notes.md`)
 
-console.log(`\n✔ 已发布 ${tag}：https://github.com/Liyucheng1997/ai-reader/releases/tag/${tag}`)
+console.log(`\n✔ 已发布 ${tag}：https://github.com/Liyucheng1997/418_lab-AI-Reader/releases/tag/${tag}`)
