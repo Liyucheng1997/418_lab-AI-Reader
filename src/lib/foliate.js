@@ -48,7 +48,7 @@ export async function extractMeta(record) {
   let cover = null
   try {
     const blob = await book.getCover?.()
-    if (blob) cover = await shrinkImage(blob, 360)
+    if (blob) cover = await shrinkImage(blob, 300)
   } catch {}
   book.destroy?.()
   return { title, author, cover }
@@ -61,6 +61,7 @@ async function shrinkImage(blob, maxW) {
   canvas.width = Math.round(bmp.width * scale)
   canvas.height = Math.round(bmp.height * scale)
   canvas.getContext('2d').drawImage(bmp, 0, 0, canvas.width, canvas.height)
-  const out = await new Promise(r => canvas.toBlob(r, 'image/png'))
+  // JPEG 缩略图约 20–30 KB（PNG 要 200 多 KB）；文件名仍是 .png，图片按内容识别格式
+  const out = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.85))
   return new Uint8Array(await out.arrayBuffer())
 }

@@ -7,6 +7,8 @@ const { Store, mergeDeep } = require('./store.cjs')
 const { streamChat, listModels } = require('./ai.cjs')
 const updater = require('./updater.cjs')
 const f5 = require('./tts.cjs')
+const linked = require('./linked.cjs')
+const covers = require('./covers.cjs')
 
 const SUPPORTED = ['epub', 'pdf', 'txt', 'mobi', 'azw3', 'azw', 'fb2', 'fbz', 'cbz']
 const DEV_URL = process.env.VITE_DEV_URL
@@ -18,6 +20,19 @@ protocol.registerSchemesAsPrivileged([
 ])
 
 if (process.env.AIR_USER_DATA) app.setPath('userData', process.env.AIR_USER_DATA) // 测试用独立数据目录
+// 数据位置：书库索引、封面、语音缓存默认在 %APPDATA%（C 盘），可以在设置里换到别的盘；新位置记在默认目录的 location.json
+const DEFAULT_DATA = app.getPath('userData')
+const LOCATION_FILE = path.join(DEFAULT_DATA, 'location.json')
+try {
+  const { dataDir } = JSON.parse(fs.readFileSync(LOCATION_FILE, 'utf8'))
+  if (dataDir && fs.existsSync(dataDir)) {
+    app.setPath('userData', dataDir)
+    // 搬家时浏览器缓存还被占用删不掉，换到新位置后再清理旧位置的缓存（书库数据搬家时已处理，这里绝不碰）
+    for (const e of fs.readdirSync(DEFAULT_DATA)) {
+      if (!['location.json', 'library', 'tts-cache'].includes(e)) fs.rmSync(path.join(DEFAULT_DATA, e), { recursive: true, force: true, maxRetries: 2 })
+    }
+  }
+} catch {}
 if (!app.requestSingleInstanceLock()) app.quit()
 
 let win = null
@@ -36,6 +51,12 @@ function extOf(p) {
 }
 const now = () => Date.now()
 const findBook = id => store.data.books.find(b => b.id === id)
+// 图书文件位置：导入的在书库目录里，关联文件夹里的直接用原文件
+function bookPath(b) {
+  if (!b.linked) return path.join(BOOK_DIR, b.id + '.' + b.format)
+  const root = store.data.linkedRoots.find(r => r.id === b.linked.root)
+  return root ? path.join(root.path, b.linked.rel) : null
+}
 
 // 从文件名推断书名、作者：“书名 (作者) (Z-Library).pdf” → 书名 / 作者
 function parseFileName(name) {
@@ -193,7 +214,10 @@ function setupIpc() {
     return store.data.books
   })
   h('books:add-to-folder', (ids, folderId) => {
-    for (const id of ids) { const b = findBook(id); if (b && !b.folders.includes(folderId)) b.folders.push(folderId) }
+    const folder = store.data.folders.find(f => f.id === folderId)
+    // 拖到关联文件夹：真的把文件移过去（导入的书则放进 OneDrive 目录）；普通文件夹只是归类
+    if (folder?.linked) linked.moveBooks(store.data, ids, folder, bookPath)
+    else for (const id of ids) { const b = findBook(id); if (b && !b.folders.includes(folderId)) b.folders.push(folderId) }
     store.save()
     return store.data.books
   })
@@ -202,18 +226,32 @@ function setupIpc() {
     store.save()
     return store.data.books
   })
-  h('books:delete', ids => {
-    for (const id of ids) {
-      const b = findBook(id)
-      if (!b) continue
-      fs.rmSync(path.join(BOOK_DIR, id + '.' + b.format), { force: true })
-      fs.rmSync(path.join(COVER_DIR, id + '.png'), { force: true })
-      delete store.data.annotations[id]
-      store.deleteChat(id)
+  h('books:delete', async ids => {
+    // 关联文件夹（OneDrive）里的书：只删本地副本，书留在云端、也留在书库里
+    const linkedBooks = ids.map(findBook).filter(b => b?.linked)
+    if (linkedBooks.length) await keepLocal(linkedBooks, false)
+    const removed = ids.map(findBook).filter(b => b && !b.linked)
+    for (const b of removed) {
+      fs.rmSync(path.join(BOOK_DIR, b.id + '.' + b.format), { force: true })
+      fs.rmSync(path.join(COVER_DIR, b.id + '.png'), { force: true })
+      delete store.data.annotations[b.id]
+      store.deleteChat(b.id)
     }
-    store.data.books = store.data.books.filter(b => !ids.includes(b.id))
+    store.data.books = store.data.books.filter(b => !removed.includes(b))
     store.save()
     return store.data.books
+  })
+  h('books:keep-local', async (ids, keep) => { await keepLocal(ids.map(findBook).filter(b => b?.linked), keep); store.save(); return store.data.books })
+  h('books:find-cover', async id => {
+    const b = findBook(id)
+    if (!b) return null
+    try {
+      const buf = await covers.findCover(webFetch, b, coverState())
+      b.coverSearched = now()
+      if (buf) { fs.writeFileSync(path.join(COVER_DIR, id + '.png'), buf); b.cover = now() }
+    } catch (e) { throw new Error('暂时查不到：' + e.message) }
+    store.save()
+    return b
   })
   h('books:save-cover', (id, bytes) => {
     const b = findBook(id)
@@ -225,20 +263,91 @@ function setupIpc() {
   })
   h('books:reveal', id => {
     const b = findBook(id)
-    if (b) shell.showItemInFolder(path.join(BOOK_DIR, id + '.' + b.format))
+    const file = b && bookPath(b)
+    if (file) shell.showItemInFolder(file)
+  })
+  h('books:get', id => findBook(id))
+  h('books:patch', (id, patch) => {
+    const b = findBook(id)
+    if (b) Object.assign(b, patch)
+    store.save()
+    if (patch.metaParsed && b && !b.cover) setTimeout(runCoverQueue, 1000) // 书里没有封面，去网上找
+    return b
   })
 
-  h('folders:create', (name, parentId) => { const f = createFolder(name, parentId || null); store.save(); return { folder: f, folders: store.data.folders } })
+  h('linked:list', () => store.data.linkedRoots)
+  h('linked:add', async () => {
+    const res = await dialog.showOpenDialog(win, { title: '选择要关联的文件夹（如 OneDrive 里的电子书目录）', properties: ['openDirectory'] })
+    if (res.canceled) return null
+    const dir = res.filePaths[0]
+    let root = store.data.linkedRoots.find(r => r.path.toLowerCase() === dir.toLowerCase())
+    if (!root) { root = linked.newRoot(dir); store.data.linkedRoots.push(root) }
+    const result = await scanRoot(root)
+    return { result, ...libSnapshot() }
+  })
+  h('linked:rescan', async rootId => {
+    const results = []
+    for (const root of store.data.linkedRoots) if (!rootId || root.id === rootId) results.push(await scanRoot(root))
+    return { results, ...libSnapshot() }
+  })
+  h('linked:remove', rootId => { linked.removeRoot(store.data, rootId); store.save(); return libSnapshot() })
+
+  h('data:info', () => ({
+    dir: app.getPath('userData'), isDefault: path.resolve(app.getPath('userData')) === path.resolve(DEFAULT_DATA),
+    library: dirSize(LIB_DIR) - dirSize(COVER_DIR), covers: dirSize(COVER_DIR), tts: dirSize(path.join(app.getPath('userData'), 'tts-cache')),
+  }))
+  h('data:open', () => shell.openPath(app.getPath('userData')))
+  h('data:move', async picked => {
+    if (!picked) {
+      const res = await dialog.showOpenDialog(win, { title: '选择新的数据位置（建议放在 C 盘以外）', properties: ['openDirectory', 'createDirectory'] })
+      if (res.canceled) return null
+      picked = res.filePaths[0]
+    }
+    let target = picked
+    // 选的是非空文件夹时，在里面建一个“AI Reader 数据”
+    if (fs.existsSync(target) && fs.readdirSync(target).length && !fs.existsSync(path.join(target, 'library', 'library.json'))) target = path.join(target, 'AI Reader 数据')
+    if (path.resolve(target) === path.resolve(app.getPath('userData'))) return null
+    await moveDataTo(target)
+  })
+
+  const folderOf = id => store.data.folders.find(x => x.id === id)
+  h('folders:create', (name, parentId) => {
+    const parent = folderOf(parentId)
+    // 在关联文件夹里新建 = 在 OneDrive 里建目录
+    const f = parent?.linked ? linked.createFolder(store.data, parent, name) : createFolder(name, parentId || null)
+    store.save()
+    return { folder: f, folders: store.data.folders }
+  })
   h('folders:update', (id, patch) => {
-    const f = store.data.folders.find(x => x.id === id)
+    const f = folderOf(id)
+    if (f?.linked && patch.name != null && patch.name !== f.name) {
+      linked.relocateFolder(store.data, f, folderOf(f.parentId), patch.name) // 改名 = 目录改名
+      const { name, ...rest } = patch
+      patch = rest
+    }
     if (f) Object.assign(f, patch)
     store.save()
     return store.data.folders
+  })
+  h('folders:local', async (id, keep) => {
+    const f = folderOf(id)
+    if (!f?.linked) return store.data.books
+    const ids = new Set(descendantIds(id))
+    await linked.setPinned([{ dir: linked.dirOf(store.data, f) }], keep)
+    for (const b of store.data.books) if (b.linked && b.folders.some(x => ids.has(x))) b.cloud = !keep
+    store.save()
+    return store.data.books
   })
   h('folders:move', (id, newParentId, beforeId) => {
     if (newParentId && descendantIds(id).includes(newParentId)) return store.data.folders // 不能移进自己的子孙
     const f = store.data.folders.find(x => x.id === id)
     if (!f) return store.data.folders
+    if (f.linked || folderOf(newParentId)?.linked) {
+      // 关联文件夹按名称排序；换了父文件夹就是在 OneDrive 里移动目录
+      if ((f.parentId || null) !== (newParentId || null)) linked.relocateFolder(store.data, f, folderOf(newParentId))
+      store.save()
+      return store.data.folders
+    }
     f.parentId = newParentId || null
     const siblings = store.data.folders.filter(x => x.parentId === f.parentId && x.id !== id).sort((a, b) => a.order - b.order)
     const idx = beforeId ? siblings.findIndex(x => x.id === beforeId) : -1
@@ -248,6 +357,7 @@ function setupIpc() {
     return store.data.folders
   })
   h('folders:delete', id => {
+    if (folderOf(id)?.linked) throw new Error('关联的文件夹请在 OneDrive 里删除，或在根文件夹上“取消关联”')
     const ids = descendantIds(id)
     store.data.folders = store.data.folders.filter(f => !ids.includes(f.id))
     for (const b of store.data.books) b.folders = b.folders.filter(f => !ids.includes(f))
@@ -309,6 +419,7 @@ function setupIpc() {
   h('ai:abort', reqId => aiJobs.get(reqId)?.abort())
 
   h('tts:synth', text => f5.synth(store.data.settings.tts, text))
+  h('tts:cancel', () => f5.cancel())
   h('tts:voices', cfg => f5.voices(cfg || store.data.settings.tts))
   h('tts:status', cfg => f5.status(cfg || store.data.settings.tts))
   h('tts:pick-file', async kind => {
@@ -317,6 +428,92 @@ function setupIpc() {
       : { title: '选择一段 5–15 秒的清晰人声作为参考音色', properties: ['openFile'], filters: [{ name: '音频', extensions: ['wav', 'mp3', 'flac', 'ogg', 'm4a'] }] })
     return res.canceled ? null : res.filePaths[0]
   })
+}
+
+const libSnapshot = () => ({ books: store.data.books, folders: store.data.folders, roots: store.data.linkedRoots })
+
+// OneDrive“释放空间 / 始终保留在此设备”
+async function keepLocal(books, keep) {
+  const targets = books.map(b => ({ file: bookPath(b) })).filter(t => t.file && fs.existsSync(t.file))
+  await linked.setPinned(targets, keep)
+  for (const b of books) b.cloud = !keep
+}
+
+// ---------- 联网补封面：书里没封面、或只在云端读不到的，按书名去网上找 ----------
+const webFetch = (url, opts) => net.fetch(url, opts) // 走系统代理
+let coverSession = null
+const coverState = () => {
+  coverSession ||= {}
+  coverSession.googleKey = store.data.settings.googleBooksKey || ''
+  return coverSession
+}
+let coverRunning = false
+async function runCoverQueue() {
+  if (coverRunning || !store.data.settings.onlineCovers) return
+  coverRunning = true
+  try {
+    const pending = () => store.data.books.find(b => !b.cover && !b.coverSearched && (b.cloud || b.metaParsed))
+    let b
+    while (store.data.settings.onlineCovers && (b = pending())) {
+      try {
+        const buf = await covers.findCover(webFetch, b, coverState())
+        b.coverSearched = now()
+        if (buf) { fs.writeFileSync(path.join(COVER_DIR, b.id + '.png'), buf); b.cover = now() }
+        store.save()
+        if (buf && win && !win.isDestroyed()) win.webContents.send('book:updated', b)
+      } catch (e) {
+        console.warn('联网找封面暂停：', e.message) // 被限流或没网，下次启动再继续
+        break
+      }
+      await new Promise(r => setTimeout(r, 1200))
+    }
+  } finally { coverRunning = false }
+}
+
+// ---------- 数据位置 ----------
+function dirSize(dir) {
+  let n = 0
+  try {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name)
+      n += e.isDirectory() ? dirSize(p) : fs.statSync(p).size
+    }
+  } catch {}
+  return n
+}
+// 换位置：把书库（索引、封面、导入的书、笔记）和语音缓存复制过去，确认后删掉旧的，再重启
+async function moveDataTo(target) {
+  const from = app.getPath('userData')
+  const parts = ['library', 'tts-cache']
+  store.flush()
+  store.save = () => {} // 搬家期间不再写旧位置
+  f5.stop()
+  fs.mkdirSync(target, { recursive: true })
+  for (const p of parts) if (fs.existsSync(path.join(from, p))) fs.cpSync(path.join(from, p), path.join(target, p), { recursive: true })
+  if (!fs.existsSync(path.join(target, 'library', 'library.json'))) throw new Error('复制失败，数据仍在原位置')
+  if (path.resolve(target) === path.resolve(DEFAULT_DATA)) fs.rmSync(LOCATION_FILE, { force: true })
+  else fs.writeFileSync(LOCATION_FILE, JSON.stringify({ dataDir: target }))
+  for (const p of parts) fs.rmSync(path.join(from, p), { recursive: true, force: true })
+  app.relaunch()
+  app.exit(0)
+}
+
+async function scanRoot(root) {
+  if (!fs.existsSync(root.path)) throw new Error('找不到文件夹：' + root.path)
+  const files = await linked.listBooks(root.path, SUPPORTED.filter(e => e !== 'fbz'))
+  const result = linked.applyScan(store.data, root, files, { extOf, parseFileName, now })
+  store.save()
+  return result
+}
+
+// 启动后在后台重新扫描关联文件夹，书库随 OneDrive 的变化自动更新
+async function rescanLinked() {
+  if (!store.data.linkedRoots.length) return
+  for (const root of store.data.linkedRoots) {
+    try { await scanRoot(root) } catch (e) { console.warn('关联文件夹扫描失败', root.path, e.message) }
+  }
+  if (win && !win.isDestroyed()) win.webContents.send('lib:changed', libSnapshot())
+  runCoverQueue()
 }
 
 function setupProtocols() {
@@ -330,7 +527,7 @@ function setupProtocols() {
     const { host, pathname } = new URL(req.url)
     const id = decodeURIComponent(pathname.slice(1))
     let file
-    if (host === 'file') { const b = findBook(id); if (b) file = path.join(BOOK_DIR, id + '.' + b.format) }
+    if (host === 'file') { const b = findBook(id); if (b) file = bookPath(b) }
     else if (host === 'cover') file = path.join(COVER_DIR, id + '.png')
     if (!file || !fs.existsSync(file)) return new Response('not found', { status: 404 })
     const res = await net.fetch(pathToFileURL(file).toString())
@@ -358,6 +555,7 @@ app.whenReady().then(() => {
   setupIpc()
   createWindow()
   registerBossKey()
+  setTimeout(rescanLinked, 3000)
   updater.setupUpdater(state => { if (win && !win.isDestroyed()) win.webContents.send('update:state', state) })
   if (store.data.settings.autoUpdate) setTimeout(() => updater.checkForUpdates(), 5000)
   nativeTheme.on('updated', () => {

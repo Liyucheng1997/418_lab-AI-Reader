@@ -9,6 +9,8 @@ const DEFAULT_SETTINGS = {
   showSubfolderItems: true,
   bossKey: 'Alt+Q',
   autoUpdate: true, // 启动时自动检查 GitHub 上的新版本
+  onlineCovers: true, // 书里没有封面时联网（Google Books / Open Library）按书名查找
+  googleBooksKey: '', // 可选：自己的 Google Books API Key，查中文书封面更稳定
   reader: {
     fontSize: 18,
     lineHeight: 1.8,
@@ -46,7 +48,8 @@ class Store {
     this.file = path.join(dir, 'library.json')
     this.chatDir = path.join(dir, 'chats')
     fs.mkdirSync(this.chatDir, { recursive: true })
-    this.data = { books: [], folders: [], annotations: {}, settings: DEFAULT_SETTINGS }
+    // linkedRoots：关联文件夹（OneDrive 等，只建索引不复制）；linkedExcluded：从书库移除的关联图书，重新扫描时跳过
+    this.data = { books: [], folders: [], annotations: {}, settings: DEFAULT_SETTINGS, linkedRoots: [], linkedExcluded: [] }
     try {
       const raw = JSON.parse(fs.readFileSync(this.file, 'utf8'))
       this.data = { ...this.data, ...raw }

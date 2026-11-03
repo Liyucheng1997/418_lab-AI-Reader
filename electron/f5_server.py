@@ -143,7 +143,16 @@ def list_voices():
     return voices
 
 
-def synth(text, ref_audio, ref_text):
+class Cancelled(Exception):
+    pass
+
+
+_epoch = 0  # 朗读位置变了（跳转 / 停止）客户端会换新的 epoch，排队中的旧请求直接放弃
+
+
+def synth(text, ref_audio, ref_text, epoch=0):
+    global _epoch
+    _epoch = max(_epoch, epoch)
     if not ref_audio:
         voices = list_voices()
         if not voices:
@@ -158,6 +167,10 @@ def synth(text, ref_audio, ref_text):
     model = _get_model()
     ref = _prepare_ref(ref_audio)
     with _infer_lock:  # 单个 GPU 模型，串行推理
+        if os.path.exists(out):  # 排队期间别的请求已经合成了同一段（预取）
+            return out
+        if epoch < _epoch:
+            raise Cancelled()
         wav, sr, _ = model.infer(
             ref_file=ref, ref_text=ref_text or "", gen_text=text, speed=1.0,
             nfe_step=32, cross_fade_duration=0.15, remove_silence=False,
@@ -202,9 +215,11 @@ class Handler(BaseHTTPRequestHandler):
             text = (body.get("text") or "").strip()
             if not text:
                 return self._send(400, "空文本", "text/plain; charset=utf-8")
-            path = synth(text, body.get("ref_audio") or "", body.get("ref_text") or "")
+            path = synth(text, body.get("ref_audio") or "", body.get("ref_text") or "", int(body.get("epoch") or 0))
             with open(path, "rb") as f:
                 self._send(200, f.read(), "audio/wav")
+        except Cancelled:
+            self._send(409, "已取消", "text/plain; charset=utf-8")
         except Exception as e:
             self._send(500, f"语音合成失败：{e}", "text/plain; charset=utf-8")
 

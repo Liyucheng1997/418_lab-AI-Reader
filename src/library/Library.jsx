@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Search, LayoutGrid, List, Plus, ChevronDown, FolderInput, Download, Folder, ChevronRight,
-  BookOpen, Star, Check, X, FolderPlus, Trash2, Library as LibIcon,
+  BookOpen, Star, Check, X, FolderPlus, Trash2, Library as LibIcon, Cloud, HardDrive, FolderSync,
 } from 'lucide-react'
 import { useLib } from '../App.jsx'
 import { openMenu, Modal } from '../lib/ui.jsx'
@@ -10,7 +10,7 @@ import Sidebar from './Sidebar.jsx'
 import {
   filterBooks, sortBooks, folderPath, childrenOf, countIn, FORMAT_LABEL, formatDate, pct,
 } from './model.js'
-import { bookMenu, folderMenu, newFolder, folderTreeItems, addToFolder, deleteBooks } from './actions.js'
+import { bookMenu, folderMenu, newFolder, folderTreeItems, addToFolder, deleteBooks, linkFolder } from './actions.js'
 import { drag, startBookDrag, endDrag, hasFiles } from './dnd.js'
 
 const VIEW_TITLE = { all: '全部图书', recent: '最近阅读', favorite: '收藏', unfiled: '未分类' }
@@ -82,6 +82,7 @@ export default function Library() {
     crumbs = path.slice(0, -1)
   } else if (view.type === 'format') title = view.value
   else if (view.type === 'status') title = STATUS_TITLE[view.value]
+  else if (view.type === 'storage') title = view.value === 'cloud' ? '仅在云端' : '本地'
   const subfolders = view.type === 'folder' ? childrenOf(folders, view.value) : []
   const currentFolder = view.type === 'folder' ? view.value : null
 
@@ -90,6 +91,7 @@ export default function Library() {
     openMenu({ clientX: r.right - 200, clientY: r.bottom + 6 }, [
       { label: '导入图书…', icon: Download, shortcut: 'Ctrl+O', onClick: async () => lib.afterImport(await window.api.importDialog(currentFolder, 'files')) },
       { label: '导入文件夹（保留结构）…', icon: FolderInput, onClick: async () => lib.afterImport(await window.api.importDialog(currentFolder, 'directory')) },
+      { label: '关联文件夹（OneDrive 等，不复制）…', icon: FolderSync, onClick: () => linkFolder(lib) },
       { sep: true },
       { label: currentFolder ? '新建子文件夹' : '新建文件夹', icon: FolderPlus, onClick: () => newFolder(lib, currentFolder) },
     ])
@@ -233,7 +235,7 @@ function FolderChip({ folder, setView }) {
 
 export function Cover({ book, mini }) {
   const fmt = FORMAT_LABEL[book.format] || book.format.toUpperCase()
-  if (book.cover) return <img src={coverURL(book.id, book.cover)} alt="" draggable={false} />
+  if (book.cover) return <img src={coverURL(book.id, book.cover)} alt="" draggable={false} loading="lazy" />
   if (mini) return <span>{fmt}</span>
   return (
     <div className="cover-ph">
@@ -245,6 +247,13 @@ export function Cover({ book, mini }) {
   )
 }
 
+// 关联文件夹里的书：标出在本地还是只在云端
+function Where({ book, inline }) {
+  return book.cloud
+    ? <span className={inline ? 'where-inline cloud' : 'where cloud'} title="仅在 OneDrive 云端，打开时自动下载"><Cloud size={11} strokeWidth={2.2} />云端</span>
+    : <span className={inline ? 'where-inline' : 'where'} title="已在本地，可离线阅读"><HardDrive size={11} strokeWidth={2.2} />本地</span>
+}
+
 function BookCard({ book, selected, index, ...handlers }) {
   return (
     <div className={`book-card ${selected ? 'selected' : ''}`} draggable onDragEnd={endDrag}
@@ -253,6 +262,7 @@ function BookCard({ book, selected, index, ...handlers }) {
         <Cover book={book} />
         {book.cover > 0 && <span className="badge">{FORMAT_LABEL[book.format]}</span>}
         {book.favorite && <span className="fav"><Star size={12} fill="currentColor" /></span>}
+        {book.linked && <Where book={book} />}
         {selected && <span className="check"><Check size={14} strokeWidth={3} /></span>}
         {book.progress > 0 && book.status !== 'finished' && <div className="bar"><i style={{ width: pct(book.progress) }} /></div>}
       </div>
@@ -289,7 +299,7 @@ function BookList({ list, sel, onClick, onContextMenu, onDragStart, sort, setSor
           onDragStart={e => onDragStart(e, b)} onDragEnd={endDrag}
           onClick={e => onClick(e, b)} onContextMenu={e => onContextMenu(e, b)}>
           <div className="mini-cover"><Cover book={b} mini /></div>
-          <div className="t" title={b.title}>{b.favorite && <Star size={12} fill="#ffd60a" color="#ffd60a" />}{b.title}</div>
+          <div className="t" title={b.title}>{b.favorite && <Star size={12} fill="#ffd60a" color="#ffd60a" />}{b.title}{b.linked && <Where book={b} inline />}</div>
           <div className="c">{b.author || '—'}</div>
           <div className="c">{FORMAT_LABEL[b.format]}</div>
           <div className="c">

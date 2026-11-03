@@ -78,9 +78,13 @@ async function request(cfg, route, body) {
   return res
 }
 
+// 跳转 / 停止朗读时换新 epoch：服务端会放弃还在排队的旧请求，新位置不用等
+let epoch = 1
+const cancel = () => { epoch++ }
+
 async function synth(cfg, text) {
   const v = cfg.f5Voice || cfg.customVoices?.[0] || {} // 都没有时由服务选第一个可用音色
-  const res = await request(cfg, '/synth', { text, ref_audio: v.refAudio || '', ref_text: v.refText || '' })
+  const res = await request(cfg, '/synth', { text, ref_audio: v.refAudio || '', ref_text: v.refText || '', epoch })
   return new Uint8Array(await res.arrayBuffer())
 }
 
@@ -96,4 +100,4 @@ async function status(cfg) {
   }
 }
 
-module.exports = { synth, voices, status, stop }
+module.exports = { synth, cancel, voices, status, stop }

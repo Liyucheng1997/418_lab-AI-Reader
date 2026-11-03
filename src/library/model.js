@@ -19,7 +19,8 @@ export function folderPath(folders, id) {
   return path
 }
 
-// 当前视图：{ type: 'all' | 'recent' | 'favorite' | 'unfiled' | 'format' | 'folder' | 'status', value }
+// 当前视图：{ type: 'all' | 'recent' | 'favorite' | 'unfiled' | 'format' | 'folder' | 'status' | 'storage', value }
+// storage：local = 不用联网就能读（导入的 + 已下载的），cloud = 只在 OneDrive 云端
 export function filterBooks(books, folders, view, { query, showSub }) {
   let list = books
   switch (view.type) {
@@ -28,6 +29,7 @@ export function filterBooks(books, folders, view, { query, showSub }) {
     case 'unfiled': list = books.filter(b => !b.folders.length); break
     case 'format': list = books.filter(b => (FORMAT_LABEL[b.format] || b.format) === view.value); break
     case 'status': list = books.filter(b => b.status === view.value); break
+    case 'storage': list = books.filter(b => view.value === 'cloud' ? b.cloud : !b.cloud); break
     case 'folder': {
       const ids = showSub ? descendants(folders, view.value) : [view.value]
       list = books.filter(b => b.folders.some(f => ids.includes(f)))
@@ -52,9 +54,23 @@ export function sortBooks(list, sort, view) {
   }
 }
 
+// 每个文件夹里的书数：书库 / 文件夹变了才重新统计一遍（关联 OneDrive 后有几千本书、几百个文件夹）
+let counts = { books: null, folders: null, showSub: null, map: null }
 export function countIn(books, folders, folderId, showSub) {
-  const ids = showSub ? descendants(folders, folderId) : [folderId]
-  return books.filter(b => b.folders.some(f => ids.includes(f))).length
+  if (counts.books !== books || counts.folders !== folders || counts.showSub !== showSub) {
+    const parent = new Map(folders.map(f => [f.id, f.parentId || null]))
+    const map = new Map()
+    for (const b of books) {
+      const hit = new Set()
+      for (let f of b.folders) {
+        if (!showSub) { hit.add(f); continue }
+        while (f && !hit.has(f)) { hit.add(f); f = parent.get(f) }
+      }
+      for (const f of hit) map.set(f, (map.get(f) || 0) + 1)
+    }
+    counts = { books, folders, showSub, map }
+  }
+  return counts.map.get(folderId) || 0
 }
 
 export function formatDate(ts) {

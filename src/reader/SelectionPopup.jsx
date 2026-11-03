@@ -1,9 +1,9 @@
 import { useLayoutEffect, useRef, useState } from 'react'
-import { Underline, NotebookPen, Copy, Sparkles, Languages, Search, Trash2, Check } from 'lucide-react'
+import { Underline, NotebookPen, Copy, Sparkles, Languages, Search, Trash2, Check, Volume2 } from 'lucide-react'
 import { HIGHLIGHT_COLORS } from './theme.js'
 
 // 选中文字 / 点击高亮后弹出的浮动工具条
-export default function SelectionPopup({ popup, onClose, addHighlight, updateAnn, removeAnn, askAI, onSearch, onCopied }) {
+export default function SelectionPopup({ popup, onClose, addHighlight, updateAnn, removeAnn, askAI, onReadFrom, onSearch, onCopied }) {
   const ref = useRef()
   const [pos, setPos] = useState(null)
   const [editing, setEditing] = useState(false)
@@ -63,6 +63,7 @@ export default function SelectionPopup({ popup, onClose, addHighlight, updateAnn
           <div className="actions">
             <button className="pop-btn" onClick={() => setEditing(true)}><NotebookPen size={15} />{ann?.note ? '编辑笔记' : '笔记'}</button>
             <button className="pop-btn" onClick={copy}><Copy size={15} />复制</button>
+            {popup.range && <button className="pop-btn" title="从这一句开始朗读" onClick={() => onReadFrom(popup.range)}><Volume2 size={15} />朗读</button>}
             <button className="pop-btn accent" onClick={() => askAI('explain', popup.text, popup.cfi, popup.index)}><Sparkles size={15} />AI 解释</button>
             <button className="pop-btn accent" onClick={() => askAI('translate', popup.text, popup.cfi, popup.index)}><Languages size={15} />翻译</button>
             {!ann && <button className="pop-btn" onClick={() => onSearch(popup.text)}><Search size={15} />搜索</button>}

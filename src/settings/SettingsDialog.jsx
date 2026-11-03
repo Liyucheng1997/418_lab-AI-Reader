@@ -4,6 +4,8 @@ import { Settings, Sparkles, Info, X, Eye, EyeOff, Keyboard, AudioLines } from '
 import { useLib } from '../App.jsx'
 import { toast, promptDialog } from '../lib/ui.jsx'
 import { useUpdateState, updateText } from './update.jsx'
+import { linkFolder, rescanLinked, unlinkFolder } from '../library/actions.js'
+import { formatDate } from '../library/model.js'
 
 // 常用服务商预设（除 Claude 外均为 OpenAI 兼容接口）
 export const PROVIDERS = [
@@ -100,7 +102,112 @@ function General() {
           </div>
         </div>
       </div>
-      <div className="set-hint">图书会复制到应用数据目录中保存，删除原文件不影响阅读。</div>
+      <div className="set-hint">导入的图书会复制到应用数据目录中保存，删除原文件不影响阅读。</div>
+      <LinkedFolders />
+      <Covers />
+      <DataLocation />
+    </>
+  )
+}
+
+// 书里没有封面（或书只在云端读不到）时联网按书名查找
+function Covers() {
+  const lib = useLib()
+  const s = lib.settings
+  const [key, setKey] = useState(s.googleBooksKey)
+  return (
+    <div className="set-card">
+      <div className="set-row">
+        <span className="k">联网补封面</span>
+        <div className="v">
+          <label className="form-check">
+            <input type="checkbox" checked={s.onlineCovers} onChange={e => lib.updateSettings({ onlineCovers: e.target.checked })} />
+            没有封面的书（包括只在云端的书）按书名去 Google Books、Open Library 查找，只发送书名和作者
+          </label>
+        </div>
+      </div>
+      <div className="set-row">
+        <span className="k">Google Books Key</span>
+        <div className="v">
+          <input className="input" value={key} onChange={e => setKey(e.target.value)} placeholder="可选，查中文书封面更稳定（每天 1000 次免费）" />
+          <button className="btn btn-sm" onClick={async () => { await lib.updateSettings({ googleBooksKey: key.trim() }); toast('已保存', 'success') }}>保存</button>
+          <button className="btn btn-sm" onClick={() => window.api.openExternal('https://developers.google.com/books/docs/v1/using#APIKey')}>怎么申请</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// 书库索引、封面、导入的书、笔记和语音缓存都放在这个文件夹，可以搬到 C 盘以外
+function DataLocation() {
+  const [info, setInfo] = useState(null)
+  const [moving, setMoving] = useState(false)
+  useEffect(() => { window.api.dataInfo().then(setInfo) }, [])
+  const mb = n => n >= 1073741824 ? (n / 1073741824).toFixed(1) + ' GB' : (n / 1048576).toFixed(n < 10485760 ? 1 : 0) + ' MB'
+  const onC = info && /^c:/i.test(info.dir)
+  const move = async () => {
+    setMoving(true)
+    try { await window.api.moveData() } catch (e) { toast(String(e.message || e).replace(/^Error invoking remote method '[^']+': (Error: )?/, ''), 'error') }
+    setMoving(false) // 成功时应用会自动重启，走不到这里
+  }
+  return (
+    <>
+      <div className="set-card">
+        <div className="set-row">
+          <span className="k">数据位置</span>
+          <div className="v">
+            <input className="input" readOnly value={info?.dir || ''} title={info?.dir} />
+            <button className="btn btn-sm" disabled={moving} onClick={() => window.api.openDataDir()}>打开</button>
+            <button className="btn btn-sm btn-primary" disabled={moving || !info} onClick={move}>{moving ? '正在搬移…' : '更改…'}</button>
+          </div>
+        </div>
+        {info && (
+          <div className="set-row">
+            <span className="k">占用</span>
+            <div className="v">
+              <span className="hint">索引、笔记与导入的书 {mb(info.library)} · 封面 {mb(info.covers)} · 语音缓存 {mb(info.tts)}</span>
+            </div>
+          </div>
+        )}
+      </div>
+      <div className="set-hint">
+        {onC ? '当前在 C 盘。' : ''}点“更改”选一个文件夹（建议 C 盘以外），会把索引、封面、笔记、导入的书和语音缓存一起搬过去，然后自动重启；旧位置的数据会删除。
+      </div>
+    </>
+  )
+}
+
+// 关联文件夹（OneDrive 等）：书留在原处，书库只存索引；启动时自动重新扫描
+function LinkedFolders() {
+  const lib = useLib()
+  const [roots, setRoots] = useState([])
+  const [busy, setBusy] = useState(null)
+  const refresh = () => window.api.linkedList().then(setRoots)
+  useEffect(() => { refresh() }, [lib.books])
+  const run = async (key, fn) => { setBusy(key); try { await fn() } finally { setBusy(null); refresh() } }
+  return (
+    <>
+      <div className="set-card">
+        <div className="set-row">
+          <span className="k">关联文件夹</span>
+          <div className="v">
+            <span className="hint" style={{ flex: 1 }}>例如 OneDrive 里的电子书目录：不复制文件，按原来的文件夹分类建索引，标出哪些书在本地、哪些只在云端。</span>
+            <button className="btn btn-sm" disabled={!!busy} onClick={() => run('add', () => linkFolder(lib))}>{busy === 'add' ? '扫描中…' : '添加…'}</button>
+          </div>
+        </div>
+        {roots.map(r => (
+          <div className="set-row" key={r.id}>
+            <span className="k" title={r.path} style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.name}</span>
+            <div className="v">
+              <span className="hint" style={{ flex: 1, minWidth: 0 }} title={r.path}>
+                {r.count} 本 · 本地 {r.count - r.cloud} · 云端 {r.cloud} · 上次扫描 {formatDate(r.lastScan)}
+              </span>
+              <button className="btn btn-sm" disabled={!!busy} onClick={() => run(r.id, () => rescanLinked(lib, r.id))}>{busy === r.id ? '扫描中…' : '重新扫描'}</button>
+              <button className="btn btn-sm" disabled={!!busy} onClick={() => run(r.id, () => unlinkFolder(lib, r.id, r.name))}>取消关联</button>
+            </div>
+          </div>
+        ))}
+      </div>
     </>
   )
 }

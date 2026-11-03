@@ -7,7 +7,7 @@ import { useLib } from '../App.jsx'
 import { loadFoliate, openBookRecord } from '../lib/foliate.js'
 import { toast } from '../lib/ui.jsx'
 import { bookCSS, resolveTheme, colorOf, isAppDark } from './theme.js'
-import { Narrator } from './tts.js'
+import { Narrator, sentencesFromRange, splitSentences, itemsFrom } from './tts.js'
 import SidePanel from './SidePanel.jsx'
 import SearchPanel from './SearchPanel.jsx'
 import AIPanel from './AIPanel.jsx'
@@ -63,7 +63,9 @@ export default function Reader({ book: record, onClose }) {
       const list = await window.api.getAnnotations(record.id)
       annsRef.current = list
       setAnns(list)
+      if (record.cloud) toast(`正在从 OneDrive 下载《${record.title}》（${(record.size / 1048576).toFixed(1)} MB）…`)
       book = await openBookRecord(record)
+      if (record.cloud) window.api.patchBook(record.id, { cloud: false }) // 读过一次就已下载到本地
       if (disposed) return book.destroy?.()
       bookRef.current = book
       if (book.rendition?.layout === 'pre-paginated') book.rendition.spread = rsRef.current.columns === 2 ? 'auto' : 'none'
@@ -159,6 +161,7 @@ export default function Reader({ book: record, onClose }) {
     doc.addEventListener('wheel', onWheel, { passive: false })
     doc.addEventListener('pointerup', () => setTimeout(() => checkSelection(doc, index), 20))
     doc.addEventListener('click', ev => onDocClick(ev, doc))
+    doc.addEventListener('dblclick', ev => onDocDblClick(ev, doc))
     doc.addEventListener('contextmenu', ev => { if (!doc.getSelection()?.isCollapsed) ev.preventDefault() })
     if (viewRef.current?.isFixedLayout) setTimeout(() => drawPdfHighlights(doc, index), 80)
   }
@@ -182,7 +185,7 @@ export default function Reader({ book: record, onClose }) {
       const a = frameRect(doc, first), b = frameRect(doc, last)
       rect = { left: Math.min(a.left, b.left), right: Math.max(a.right, b.right), top: a.top, bottom: b.bottom }
     }
-    setPopup({ kind, ann, text: text ?? ann?.text, cfi: cfi ?? ann?.cfi, index: index ?? ann?.index, rect })
+    setPopup({ kind, ann, text: text ?? ann?.text, cfi: cfi ?? ann?.cfi, index: index ?? ann?.index, rect, range })
   }
 
   const checkSelection = (doc, index) => {
@@ -196,6 +199,32 @@ export default function Reader({ book: record, onClose }) {
     showPopupFor({ kind: 'select', range, text, cfi, index })
   }
 
+  // 鼠标下面确实是文字时，返回对应的文本位置（点在页边空白处返回 null）
+  const textPointAt = (doc, x, y) => {
+    const caret = doc.caretRangeFromPoint?.(x, y)
+    const node = caret?.startContainer
+    if (!node || node.nodeType !== 3) return null
+    const offset = caret.startOffset
+    const r = doc.createRange()
+    for (const [a, b] of [[offset, offset + 1], [offset - 1, offset]]) {
+      if (a < 0 || b > node.length) continue
+      r.setStart(node, a)
+      r.setEnd(node, b)
+      const box = r.getBoundingClientRect()
+      if (x >= box.left - 4 && x <= box.right + 4 && y >= box.top - 4 && y <= box.bottom + 4) return { node, offset }
+    }
+    return null
+  }
+
+  // 朗读中双击文字：从这一句开始读（不选中词、不弹工具条）
+  const onDocDblClick = (ev, doc) => {
+    if (!narrator.current?.playing) return
+    const at = textPointAt(doc, ev.clientX, ev.clientY)
+    if (!at) return
+    doc.getSelection()?.removeAllRanges()
+    readFrom(at.node, at.offset)
+  }
+
   const onDocClick = (ev, doc) => {
     if (!doc.getSelection()?.isCollapsed) return
     if (ev.target.closest?.('a[href]')) return
@@ -203,6 +232,8 @@ export default function Reader({ book: record, onClose }) {
       if (Date.now() - annClickAt.current < 400) return
       setPopup(null)
       setTypeOpen(false)
+      // 朗读中单击文字不翻页，免得双击跳转时连翻两页
+      if (narrator.current?.playing && textPointAt(doc, ev.clientX, ev.clientY)) return
       if (rsRef.current.flow === 'scrolled' && !viewRef.current?.isFixedLayout) return
       const stage = stageRef.current.getBoundingClientRect()
       const x = frameRect(doc, { left: ev.clientX, right: ev.clientX, top: ev.clientY, bottom: ev.clientY }).left
@@ -400,24 +431,99 @@ export default function Reader({ book: record, onClose }) {
   }
 
   // ---------- 朗读 ----------
-  const toggleSpeak = () => {
+  // ---------- 朗读内容来源 ----------
+  // 可重排的书（EPUB/TXT/MOBI…）按章连续朗读，页面跟着正在读的句子翻，翻页不停顿；
+  // PDF 按页读（用文本层），拿不到文本层时退回纯文本
+  const sectionItems = doc => {
+    const r = doc.createRange()
+    r.selectNodeContents(doc.body)
+    return sentencesFromRange(r)
+  }
+  const nextSectionIndex = index => {
+    const sections = bookRef.current?.sections || []
+    for (let i = index + 1; i < sections.length; i++) if (sections[i]?.linear !== 'no') return i
+    return null
+  }
+  const pageItems = async () => {
+    const view = viewRef.current
+    if (view?.isFixedLayout) {
+      const out = []
+      for (const c of view.renderer.getContents?.() || []) {
+        const layer = c.doc?.querySelector('.textLayer')
+        if (!layer) continue
+        const r = c.doc.createRange()
+        r.selectNodeContents(layer)
+        out.push(...sentencesFromRange(r, { openTail: true }))
+      }
+      if (out.length) return out
+    }
+    return splitSentences(await getPageText()).map(text => ({ text }))
+  }
+  const narrationSource = {
+    async first(from) {
+      const view = viewRef.current
+      const vis = locRef.current?.range
+      if (!view.isFixedLayout && vis) {
+        const { doc, index } = view.renderer.getContents()[0]
+        const at = from || { node: vis.startContainer, offset: vis.startOffset }
+        return { section: true, index, items: itemsFrom(sectionItems(doc), at) }
+      }
+      return { items: itemsFrom(await pageItems(), from) }
+    },
+    async next(chunk) {
+      const view = viewRef.current
+      if (chunk.section) {
+        const index = nextSectionIndex(chunk.index)
+        if (index == null) return null
+        await view.renderer.goTo({ index })
+        const c = view.renderer.getContents()[0]
+        if (c?.index !== index) return null
+        return { section: true, index, items: sectionItems(c.doc) }
+      }
+      if (locRef.current?.fraction >= 0.999) return null
+      await view.next()
+      await new Promise(r => setTimeout(r, 400))
+      return { items: await pageItems() }
+    },
+    async peek(chunk) {
+      if (!chunk.section) return null
+      const index = nextSectionIndex(chunk.index)
+      const section = index != null && bookRef.current.sections[index]
+      if (!section?.createDocument) return null
+      return sectionItems(await section.createDocument())
+    },
+    // 正在读的句子翻出了屏幕（读到下一页了，或用户自己翻走了）就把页面翻过去
+    follow(range) {
+      const vis = locRef.current?.range
+      const view = viewRef.current
+      if (!vis || view.isFixedLayout || vis.startContainer.ownerDocument !== range.startContainer.ownerDocument) return
+      const { startContainer: sn, startOffset: so, endContainer: en, endOffset: eo } = range
+      const startPos = vis.comparePoint(sn, so)
+      const after = startPos > 0 || (startPos === 0 && sn === vis.endContainer && so >= vis.endOffset)
+      const before = vis.comparePoint(en, eo) < 0
+      if (after || before) view.renderer.scrollToAnchor(range)
+    },
+  }
+
+  const ensureNarrator = () => {
     if (!narrator.current) {
       narrator.current = new Narrator({
-        getPageText,
+        source: narrationSource,
         onState: setSpeaking,
         getSettings: () => ttsRef.current,
         onNotice: (msg, type) => toast(msg, type),
-        nextPage: async () => {
-          const before = locRef.current?.fraction
-          if (before >= 0.999) return false
-          await viewRef.current.next()
-          await new Promise(r => setTimeout(r, 400))
-          return true
-        },
       })
     }
-    if (speaking) narrator.current.stop()
-    else narrator.current.start()
+    return narrator.current
+  }
+  const toggleSpeak = () => {
+    if (speaking) ensureNarrator().stop()
+    else ensureNarrator().start()
+  }
+  const readFrom = (node, offset) => {
+    setPopup(null)
+    viewRef.current?.deselect()
+    ensureNarrator().start({ node, offset })
   }
 
   const toggleFull = async () => setFull(await window.api.toggleFullscreen())
@@ -534,6 +640,7 @@ export default function Reader({ book: record, onClose }) {
         <SelectionPopup popup={popup} onClose={() => setPopup(null)}
           addHighlight={addHighlight} updateAnn={updateAnn} removeAnn={removeAnn}
           askAI={askAI}
+          onReadFrom={range => readFrom(range.startContainer, range.startOffset)}
           onSearch={text => { setRight('search'); setPopup(null); setTimeout(() => window.dispatchEvent(new CustomEvent('air-search', { detail: text })), 50) }}
           onCopied={() => { toast('已复制'); setPopup(null) }} />
       )}

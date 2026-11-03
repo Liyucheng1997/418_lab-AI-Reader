@@ -22,9 +22,17 @@ export default function App() {
   useEffect(() => {
     window.api.getLibrary().then(data => {
       setLib({ books: data.books, folders: data.folders, settings: data.settings })
-      queue.current.push(...data.books.filter(b => !b.metaParsed).map(b => b.id))
+      queue.current.push(...data.books.filter(b => !b.metaParsed && !b.cloud).map(b => b.id))
       runQueue()
     })
+    // 关联文件夹在后台重新扫描后，书库跟着更新
+    window.api.onLibChanged(snap => {
+      setLib(l => ({ ...l, books: snap.books, folders: snap.folders }))
+      queue.current.push(...snap.books.filter(b => !b.metaParsed && !b.cloud).map(b => b.id))
+      runQueue()
+    })
+    // 后台联网找到封面后，单本更新
+    window.api.onBookUpdated(book => setLib(l => ({ ...l, books: l.books.map(b => b.id === book.id ? book : b) })))
   }, [])
 
   // ---------- 主题 ----------
@@ -48,9 +56,8 @@ export default function App() {
     while (queue.current.length) {
       setParsing(queue.current.length)
       const id = queue.current.shift()
-      const current = await window.api.getLibrary()
-      const book = current.books.find(b => b.id === id)
-      if (!book || book.metaParsed) continue
+      const book = await window.api.getBook(id)
+      if (!book || book.metaParsed || book.cloud) continue // 云端的书一读就会触发下载，等打开过再解析
       try {
         const meta = await extractMeta(book)
         const patch = { metaParsed: true }
@@ -59,13 +66,13 @@ export default function App() {
         const titleOk = meta.title && !JUNK_META.test(meta.title) && !(cjk(book.title) && !cjk(meta.title) && book.format === 'pdf')
         if (titleOk) patch.title = meta.title
         if (meta.author && !JUNK_META.test(meta.author)) patch.author = meta.author
-        let books = await window.api.updateBooks(id, patch)
-        if (meta.cover) { await window.api.saveCover(id, meta.cover); books = (await window.api.getLibrary()).books }
-        setLib(l => ({ ...l, books }))
+        let updated = await window.api.patchBook(id, patch)
+        if (meta.cover) updated = await window.api.saveCover(id, meta.cover)
+        setLib(l => ({ ...l, books: l.books.map(b => b.id === id ? updated : b) }))
       } catch (e) {
         console.warn('解析失败', book.fileName, e)
-        const books = await window.api.updateBooks(id, { metaParsed: true })
-        setLib(l => ({ ...l, books }))
+        const updated = await window.api.patchBook(id, { metaParsed: true })
+        setLib(l => ({ ...l, books: l.books.map(b => b.id === id ? updated : b) }))
       }
     }
     setParsing(0)
@@ -120,7 +127,11 @@ export default function App() {
     <LibCtx.Provider value={api}>
       <div className="app">
         {reading
-          ? <Reader key={reading.id} book={reading} onClose={() => setReadingId(null)} />
+          ? <Reader key={reading.id} book={reading} onClose={() => {
+              setReadingId(null)
+              // 从云端打开过的书现在已在本地，补上书名、作者、封面
+              if (!reading.metaParsed) { queue.current.push(reading.id); runQueue() }
+            }} />
           : <Library />}
       </div>
       {settingsTab && <SettingsDialog tab={settingsTab} onClose={() => setSettingsTab(null)} />}

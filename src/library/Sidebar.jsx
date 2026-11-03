@@ -1,12 +1,12 @@
 import { useState } from 'react'
 import {
   Library as LibIcon, Clock, Star, Inbox, FileText, Folder, FolderOpen, ChevronRight, Plus,
-  Settings, Moon, Sun, BookOpen, CheckCircle2, Sparkles,
+  Settings, Moon, Sun, BookOpen, CheckCircle2, Sparkles, Cloud, HardDrive, FolderSync,
 } from 'lucide-react'
 import { useLib } from '../App.jsx'
 import { openMenu, toast } from '../lib/ui.jsx'
 import { childrenOf, countIn, descendants, FORMAT_LABEL } from './model.js'
-import { folderMenu, newFolder } from './actions.js'
+import { folderMenu, newFolder, addToFolder, errText } from './actions.js'
 import { drag, startFolderDrag, endDrag, hasFiles } from './dnd.js'
 
 const same = (a, b) => a.type === b.type && a.value === b.value
@@ -53,7 +53,7 @@ export default function Sidebar({ view, setView }) {
               setRootDrop(false)
               if (drag.kind !== 'folder') return
               e.preventDefault()
-              lib.setFolders(await window.api.moveFolder(drag.folderId, null))
+              try { lib.setFolders(await window.api.moveFolder(drag.folderId, null)) } catch (err) { toast(errText(err), 'error') }
               endDrag()
             }}>
             <span>文件夹</span>
@@ -70,6 +70,14 @@ export default function Sidebar({ view, setView }) {
           <Item v={{ type: 'status', value: 'reading' }} icon={BookOpen} label="在读" count={books.filter(b => b.status === 'reading').length || null} />
           <Item v={{ type: 'status', value: 'finished' }} icon={CheckCircle2} label="已读完" count={books.filter(b => b.status === 'finished').length || null} />
         </div>
+
+        {books.some(b => b.linked) && (
+          <div className="sb-group">
+            <div className="sb-group-head"><span>位置</span></div>
+            <Item v={{ type: 'storage', value: 'local' }} icon={HardDrive} label="本地" count={books.filter(b => !b.cloud).length} />
+            <Item v={{ type: 'storage', value: 'cloud' }} icon={Cloud} label="仅在云端" count={books.filter(b => b.cloud).length || null} />
+          </div>
+        )}
 
         {formats.length > 0 && (
           <div className="sb-group">
@@ -120,18 +128,19 @@ function FolderNode({ folder, depth, view, setView }) {
     e.preventDefault()
     e.stopPropagation()
     if (drag.kind === 'books') {
-      lib.setBooks(await window.api.addToFolder(drag.ids, folder.id))
-      toast(`已添加 ${drag.ids.length} 本书到“${folder.name}”`, 'success')
+      await addToFolder(lib, drag.ids, folder) // 关联文件夹：在 OneDrive 里移动文件
     } else if (drag.kind === 'folder') {
-      if (where === 'into') {
-        lib.setFolders(await window.api.moveFolder(drag.folderId, folder.id))
-        if (!folder.expanded) lib.setFolders(await window.api.updateFolder(folder.id, { expanded: true }))
-      } else {
-        const siblings = childrenOf(folders, folder.parentId).filter(f => f.id !== drag.folderId)
-        const idx = siblings.findIndex(f => f.id === folder.id)
-        const before = where === 'before' ? folder.id : siblings[idx + 1]?.id
-        lib.setFolders(await window.api.moveFolder(drag.folderId, folder.parentId, before))
-      }
+      try {
+        if (where === 'into') {
+          lib.setFolders(await window.api.moveFolder(drag.folderId, folder.id))
+          if (!folder.expanded) lib.setFolders(await window.api.updateFolder(folder.id, { expanded: true }))
+        } else {
+          const siblings = childrenOf(folders, folder.parentId).filter(f => f.id !== drag.folderId)
+          const idx = siblings.findIndex(f => f.id === folder.id)
+          const before = where === 'before' ? folder.id : siblings[idx + 1]?.id
+          lib.setFolders(await window.api.moveFolder(drag.folderId, folder.parentId, before))
+        }
+      } catch (err) { toast(errText(err), 'error') } // 关联文件夹只能在同一个仓库里移动
     } else if (hasFiles(e)) {
       const paths = [...e.dataTransfer.files].map(f => window.api.pathForFile(f)).filter(Boolean)
       lib.afterImport(await window.api.importPaths(paths, folder.id))
@@ -158,9 +167,11 @@ function FolderNode({ folder, depth, view, setView }) {
           style={{ visibility: kids.length ? 'visible' : 'hidden' }}>
           <ChevronRight size={13} strokeWidth={2.2} />
         </span>
-        {active || (folder.expanded && kids.length)
-          ? <FolderOpen size={16} strokeWidth={1.75} className="ico" />
-          : <Folder size={16} strokeWidth={1.75} className="ico" />}
+        {folder.linked && !folder.parentId
+          ? <FolderSync size={16} strokeWidth={1.75} className="ico" />
+          : active || (folder.expanded && kids.length)
+            ? <FolderOpen size={16} strokeWidth={1.75} className="ico" />
+            : <Folder size={16} strokeWidth={1.75} className="ico" />}
         <span className="label">{folder.name}</span>
         {count > 0 && <span className="count">{count}</span>}
       </div>

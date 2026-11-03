@@ -208,3 +208,11 @@
 .update-banner { position: fixed; right: 20px; bottom: 20px; z-index: 3000; display: flex; align-items: center; gap: 10px; padding: 8px 8px 8px 16px; background: var(--panel); border-radius: 99px; box-shadow: var(--shadow-pop); font-size: 13px; font-weight: 500; animation: update-in 0.35s var(--spring); }
 .update-banner .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--primary); }
 @keyframes update-in { from { opacity: 0; transform: translateY(8px) scale(0.96); } }
+
+/* 关联文件夹（OneDrive）里的书：本地 / 云端标记 */
+.cover .where { position: absolute; right: 6px; bottom: 10px; height: 18px; padding: 0 6px; border-radius: 9px; background: rgba(0, 0, 0, 0.55); color: #fff; font-size: 10px; font-weight: 600; display: flex; align-items: center; gap: 3px; }
+.cover .where.cloud { background: rgba(10, 132, 255, 0.85); }
+.where-inline { flex-shrink: 0; display: inline-flex; align-items: center; gap: 3px; height: 17px; padding: 0 6px; border-radius: 9px; background: var(--fill); color: var(--text-2); font-size: 10.5px; font-weight: 600; }
+.where-inline.cloud { background: rgba(10, 132, 255, 0.14); color: var(--primary); }
+/* 几千本书时只渲染看得见的卡片 */
+.book-card { content-visibility: auto; contain-intrinsic-size: auto 260px; }
