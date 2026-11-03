@@ -73,7 +73,9 @@ const renderPage = async (page, getImageBlob) => {
         canvas.height = viewport.height
         canvas.width = viewport.width
         const canvasContext = canvas.getContext('2d')
-        await page.render({ canvasContext, viewport }).promise
+        // AI Reader：封面在后台生成，窗口最小化 / 被遮住时 requestAnimationFrame 不触发，
+        // 默认的 display 渲染会一直卡住；print 模式不依赖它
+        await page.render({ canvasContext, viewport, intent: 'print' }).promise
         return new Promise(resolve => canvas.toBlob(resolve))
     }
     const src = URL.createObjectURL(new Blob([`

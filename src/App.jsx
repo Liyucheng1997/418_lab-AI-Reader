@@ -22,15 +22,9 @@ export default function App() {
   useEffect(() => {
     window.api.getLibrary().then(data => {
       setLib({ books: data.books, folders: data.folders, settings: data.settings })
-      queue.current.push(...data.books.filter(b => !b.metaParsed && !b.cloud).map(b => b.id))
-      runQueue()
     })
     // 关联文件夹在后台重新扫描后，书库跟着更新
-    window.api.onLibChanged(snap => {
-      setLib(l => ({ ...l, books: snap.books, folders: snap.folders }))
-      queue.current.push(...snap.books.filter(b => !b.metaParsed && !b.cloud).map(b => b.id))
-      runQueue()
-    })
+    window.api.onLibChanged(snap => setLib(l => ({ ...l, books: snap.books, folders: snap.folders })))
     // 后台联网找到封面后，单本更新
     window.api.onBookUpdated(book => setLib(l => ({ ...l, books: l.books.map(b => b.id === book.id ? book : b) })))
   }, [])
@@ -59,7 +53,11 @@ export default function App() {
       const book = await window.api.getBook(id)
       if (!book || book.metaParsed || book.cloud) continue // 云端的书一读就会触发下载，等打开过再解析
       try {
-        const meta = await extractMeta(book)
+        // 个别损坏的大 PDF 可能一直解析不完，别让一本书卡住后面所有的书
+        const meta = await Promise.race([
+          extractMeta(book),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('解析超时')), 90000)),
+        ])
         const patch = { metaParsed: true }
         // PDF 元数据常是“Administrator”“Crack by …”这类无效信息，此时保留文件名
         const cjk = s => /[一-龥]/.test(s)
@@ -71,13 +69,29 @@ export default function App() {
         setLib(l => ({ ...l, books: l.books.map(b => b.id === id ? updated : b) }))
       } catch (e) {
         console.warn('解析失败', book.fileName, e)
-        const updated = await window.api.patchBook(id, { metaParsed: true })
+        // 超时可能只是一时卡住，下次启动再试一次；两次都不行或文件本身解析失败就算了
+        const tries = (book.metaTries || 0) + 1
+        const done = e.message !== '解析超时' || tries >= 2
+        const updated = await window.api.patchBook(id, done ? { metaParsed: true } : { metaTries: tries })
         setLib(l => ({ ...l, books: l.books.map(b => b.id === id ? updated : b) }))
       }
     }
     setParsing(0)
     busy.current = false
   }, [])
+
+  // 书库里凡是在本地、还没解析过的书都排进队列：不管是导入、关联文件夹、重新扫描、
+  // 从云端下载还是打开过一次，都不用各处单独通知
+  const queued = useRef(new Set())
+  const books = lib?.books
+  useEffect(() => {
+    if (!books) return
+    const ids = books.filter(b => !b.metaParsed && !b.cloud && !queued.current.has(b.id)).map(b => b.id)
+    if (!ids.length) return
+    for (const id of ids) queued.current.add(id)
+    queue.current.push(...ids)
+    runQueue()
+  }, [books, runQueue])
 
   const afterImport = useCallback(res => {
     if (!res) return
@@ -86,10 +100,8 @@ export default function App() {
     if (n) toast(`已导入 ${n} 本书${res.duplicates ? `，${res.duplicates} 本已存在` : ''}`, 'success')
     else if (res.duplicates) toast(`${res.duplicates} 本书已在书库中`)
     else toast('没有找到支持的电子书文件', 'error')
-    queue.current.push(...res.added.map(b => b.id))
-    runQueue()
     return res
-  }, [runQueue])
+  }, [])
 
   // 双击文件 / 命令行打开
   useEffect(() => {
@@ -127,11 +139,7 @@ export default function App() {
     <LibCtx.Provider value={api}>
       <div className="app">
         {reading
-          ? <Reader key={reading.id} book={reading} onClose={() => {
-              setReadingId(null)
-              // 从云端打开过的书现在已在本地，补上书名、作者、封面
-              if (!reading.metaParsed) { queue.current.push(reading.id); runQueue() }
-            }} />
+          ? <Reader key={reading.id} book={reading} onClose={() => setReadingId(null)} />
           : <Library />}
       </div>
       {settingsTab && <SettingsDialog tab={settingsTab} onClose={() => setSettingsTab(null)} />}

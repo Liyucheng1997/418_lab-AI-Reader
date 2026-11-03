@@ -283,11 +283,13 @@ function setupIpc() {
     let root = store.data.linkedRoots.find(r => r.path.toLowerCase() === dir.toLowerCase())
     if (!root) { root = linked.newRoot(dir); store.data.linkedRoots.push(root) }
     const result = await scanRoot(root)
+    setTimeout(runCoverQueue, 2000) // 云端的书没法读内置封面，直接联网找
     return { result, ...libSnapshot() }
   })
   h('linked:rescan', async rootId => {
     const results = []
     for (const root of store.data.linkedRoots) if (!rootId || root.id === rootId) results.push(await scanRoot(root))
+    setTimeout(runCoverQueue, 2000)
     return { results, ...libSnapshot() }
   })
   h('linked:remove', rootId => { linked.removeRoot(store.data, rootId); store.save(); return libSnapshot() })
