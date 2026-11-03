@@ -43,7 +43,7 @@ npm run dist     # 打包 Windows 安装程序 → release/AI-Reader-Setup-<版�
 npm run release -- patch   # 1.1.0 → 1.1.1，自动提交、打 tag、推送、打包并上传到 GitHub Releases
 ```
 
-也可以用 `minor`、`major` 或具体版本号（如 `1.2.0`）。发布需要 GitHub 令牌，脚本会自动读取 `gh auth token`，也可设置环境变量 `GH_TOKEN`。上传内容包括安装包、`.blockmap`（增量下载用）和 `latest.yml`（客户端靠它判断最新版本），缺了 `latest.yml` 客户端就检测不到更新。
+也可以用 `minor`、`major` 或具体版本号（如 `1.2.0`）。发布需要先用 `gh auth login` 登录 GitHub，发布说明取自上个版本以来的提交标题。仓库需保持公开，客户端才能匿名读取 Releases。上传内容包括安装包、`.blockmap`（增量下载用）和 `latest.yml`（客户端靠它判断最新版本），缺了 `latest.yml` 客户端就检测不到更新。
 
 应用图标由 `scripts/make-icon.ps1` 生成到 `build/icon.png`。
 
