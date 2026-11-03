@@ -1,0 +1,95 @@
+{
+  "name": "ai-reader",
+  "productName": "AI Reader",
+  "version": "1.0.0",
+  "description": "简约阅读器：EPUB / PDF / TXT / MOBI / AZW3，多级文件夹书库，AI 辅助阅读",
+  "main": "electron/main.cjs",
+  "author": "liyucheng",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "vite build",
+    "start": "vite build && electron .",
+    "dist": "vite build && electron-builder --win --x64"
+  },
+  "build": {
+    "appId": "com.liyucheng.aireader",
+    "productName": "AI Reader",
+    "copyright": "© 2026 liyucheng",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**",
+      "electron/**",
+      "package.json"
+    ],
+    "fileAssociations": [
+      {
+        "ext": "epub",
+        "name": "EPUB 电子书",
+        "role": "Viewer"
+      },
+      {
+        "ext": "mobi",
+        "name": "MOBI 电子书",
+        "role": "Viewer"
+      },
+      {
+        "ext": "azw3",
+        "name": "AZW3 电子书",
+        "role": "Viewer"
+      },
+      {
+        "ext": "azw",
+        "name": "AZW 电子书",
+        "role": "Viewer"
+      },
+      {
+        "ext": "fb2",
+        "name": "FB2 电子书",
+        "role": "Viewer"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "AI Reader",
+      "artifactName": "AI-Reader-Setup-${version}.${ext}",
+      "installerLanguages": [
+        "zh_CN"
+      ],
+      "language": "2052"
+    }
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.4.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.2.1",
+    "dompurify": "^3.4.17",
+    "electron": "^45.2.1",
+    "electron-builder": "^26.18.0",
+    "lucide-react": "^1.67.0",
+    "marked": "^18.1.3",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "vite": "^8.3.5"
+  }
+}
