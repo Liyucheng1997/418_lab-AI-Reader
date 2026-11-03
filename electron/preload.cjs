@@ -34,6 +34,16 @@ contextBridge.exposeInMainWorld('api', {
   saveText: (name, content) => invoke('file:save-text', name, content),
   openExternal: url => invoke('shell:open', url),
 
+  appVersion: () => invoke('app:version'),
+  updateState: () => invoke('update:state'),
+  checkUpdate: () => invoke('update:check'),
+  installUpdate: () => invoke('update:install'),
+  onUpdateState: fn => {
+    const listener = (_e, state) => fn(state)
+    ipcRenderer.on('update:state', listener)
+    return () => ipcRenderer.removeListener('update:state', listener)
+  },
+
   aiModels: cfg => invoke('ai:models', cfg),
   aiChat: (reqId, payload) => invoke('ai:chat', reqId, payload),
   aiAbort: reqId => invoke('ai:abort', reqId),

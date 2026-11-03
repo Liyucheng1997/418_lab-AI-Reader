@@ -8,6 +8,7 @@ const DEFAULT_SETTINGS = {
   sort: 'lastRead', // lastRead | added | title | author | progress
   showSubfolderItems: true,
   bossKey: 'Alt+Q',
+  autoUpdate: true, // 启动时自动检查 GitHub 上的新版本
   reader: {
     fontSize: 18,
     lineHeight: 1.8,

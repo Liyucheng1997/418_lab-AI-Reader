@@ -5,6 +5,7 @@ const crypto = require('crypto')
 const { pathToFileURL } = require('url')
 const { Store, mergeDeep } = require('./store.cjs')
 const { streamChat, listModels } = require('./ai.cjs')
+const updater = require('./updater.cjs')
 
 const SUPPORTED = ['epub', 'pdf', 'txt', 'mobi', 'azw3', 'azw', 'fb2', 'fbz', 'cbz']
 const DEV_URL = process.env.VITE_DEV_URL
@@ -282,6 +283,11 @@ function setupIpc() {
   })
   h('shell:open', url => { if (/^https?:/.test(url)) shell.openExternal(url) })
 
+  h('app:version', () => app.getVersion())
+  h('update:state', () => updater.getState())
+  h('update:check', () => updater.checkForUpdates(true))
+  h('update:install', () => updater.installNow())
+
   h('ai:models', cfg => listModels(cfg))
   ipcMain.handle('ai:chat', async (e, reqId, payload) => {
     const ctrl = new AbortController()
@@ -340,6 +346,8 @@ app.whenReady().then(() => {
   setupIpc()
   createWindow()
   registerBossKey()
+  updater.setupUpdater(state => { if (win && !win.isDestroyed()) win.webContents.send('update:state', state) })
+  if (store.data.settings.autoUpdate) setTimeout(() => updater.checkForUpdates(), 5000)
   nativeTheme.on('updated', () => {
     if (store.data.settings.theme === 'system' && win) win.setTitleBarOverlay(overlayColors(isDark()))
   })

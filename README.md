@@ -30,8 +30,20 @@ Key 只保存在本机的应用数据目录中。
 npm install
 npm run dev      # 开发模式（Vite 热更新 + Electron）
 npm start        # 构建后运行
-npm run dist     # 打包 Windows 安装程序 → release/AI-Reader-Setup-1.0.0.exe
+npm run dist     # 打包 Windows 安装程序 → release/AI-Reader-Setup-<版本>.exe
 ```
+
+## 发布与自动更新
+
+已安装的程序启动 5 秒后会检查 GitHub Releases，发现新版本就在后台下载，下载完成后右下角提示“重启更新”；不点的话，下次退出时也会自动安装。“设置 → 关于”里可以手动检查更新或关闭自动检查。
+
+改完代码、提交后，一条命令发布新版本：
+
+```bash
+npm run release -- patch   # 1.1.0 → 1.1.1，自动提交、打 tag、推送、打包并上传到 GitHub Releases
+```
+
+也可以用 `minor`、`major` 或具体版本号（如 `1.2.0`）。发布需要 GitHub 令牌，脚本会自动读取 `gh auth token`，也可设置环境变量 `GH_TOKEN`。上传内容包括安装包、`.blockmap`（增量下载用）和 `latest.yml`（客户端靠它判断最新版本），缺了 `latest.yml` 客户端就检测不到更新。
 
 应用图标由 `scripts/make-icon.ps1` 生成到 `build/icon.png`。
 
@@ -40,7 +52,7 @@ npm run dist     # 打包 Windows 安装程序 → release/AI-Reader-Setup-1.0.0
 ## 结构
 
 ```
-electron/      主进程：书库存储、导入、自定义协议、AI 调用
+electron/      主进程：书库存储、导入、自定义协议、AI 调用、自动更新
 src/library/   书库界面：侧栏文件夹树、网格 / 列表、右键菜单、拖拽
 src/reader/    阅读器：翻页、标注、目录、搜索、排版、朗读、AI 面板
 src/lib/       foliate-js 加载、TXT 分章、弹层组件

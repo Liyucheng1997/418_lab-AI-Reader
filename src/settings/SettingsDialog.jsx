@@ -1,8 +1,9 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Settings, Sparkles, Info, X, Eye, EyeOff, Keyboard } from 'lucide-react'
 import { useLib } from '../App.jsx'
 import { toast } from '../lib/ui.jsx'
+import { useUpdateState, updateText } from './update.jsx'
 
 // 常用服务商预设（除 Claude 外均为 OpenAI 兼容接口）
 export const PROVIDERS = [
@@ -219,12 +220,36 @@ function Keys() {
 }
 
 function About() {
+  const lib = useLib()
+  const [version, setVersion] = useState('')
+  const up = useUpdateState()
+  useEffect(() => { window.api.appVersion().then(setVersion) }, [])
+  const busy = ['checking', 'available', 'downloading'].includes(up.status)
+  const text = updateText(up)
   return (
     <>
       <div className="eyebrow">ABOUT</div>
       <h2>AI Reader</h2>
       <div className="set-card">
-        <div className="set-row"><span className="k">版本</span><div className="v">1.0.0</div></div>
+        <div className="set-row"><span className="k">版本</span><div className="v">{version}</div></div>
+        <div className="set-row">
+          <span className="k">更新</span>
+          <div className="v">
+            {up.status === 'downloaded'
+              ? <button className="btn btn-sm btn-primary" onClick={() => window.api.installUpdate()}>重启并更新</button>
+              : <button className="btn btn-sm" disabled={busy || up.status === 'dev'} onClick={() => window.api.checkUpdate()}>检查更新</button>}
+            {text && <span className={up.status === 'error' ? 'status-line err' : up.status === 'none' || up.status === 'downloaded' ? 'status-line ok' : 'hint'}>{text}</span>}
+          </div>
+        </div>
+        <div className="set-row">
+          <span className="k">自动更新</span>
+          <div className="v">
+            <label className="form-check">
+              <input type="checkbox" checked={lib.settings.autoUpdate} onChange={e => lib.updateSettings({ autoUpdate: e.target.checked })} />
+              启动时自动检查 GitHub 上的新版本，并在后台下载
+            </label>
+          </div>
+        </div>
         <div className="set-row"><span className="k">支持格式</span><div className="v">EPUB · PDF · TXT · MOBI · AZW3 · FB2 · CBZ</div></div>
         <div className="set-row"><span className="k">渲染引擎</span><div className="v">foliate-js（MIT）· pdf.js</div></div>
       </div>

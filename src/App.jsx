@@ -4,6 +4,7 @@ import { extractMeta } from './lib/foliate.js'
 import Library from './library/Library.jsx'
 import Reader from './reader/Reader.jsx'
 import SettingsDialog from './settings/SettingsDialog.jsx'
+import { UpdateBanner } from './settings/update.jsx'
 
 const JUNK_META = /^(administrator|admin|user|unknown|anonymous|untitled|microsoft|作者|无标题|未知)\b|crack|^document\d*$|\.(docx?|pdf|indd|tex)$/i
 
@@ -123,6 +124,7 @@ export default function App() {
           : <Library />}
       </div>
       {settingsTab && <SettingsDialog tab={settingsTab} onClose={() => setSettingsTab(null)} />}
+      <UpdateBanner />
       <UIHost />
     </LibCtx.Provider>
   )
