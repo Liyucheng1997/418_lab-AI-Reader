@@ -63,7 +63,61 @@ export function applyOcrLayer(doc, page) {
     const natural = s.offsetWidth
     if (natural > 0 && w > 0) s.style.transform = `scaleX(${(w * W) / natural})`
   }
+  bindSelection(doc, layer, spans.map(([s]) => s))
   return true
+}
+
+// 文字是一行行绝对定位的块，鼠标落在行间、段间或页边空白处时，Chromium 会把选区
+// 端点放到整层末尾，一拖就选中本页剩下的全部文字。这里接管鼠标拖选：端点总是
+// 吸附到离鼠标最近的那一行上
+function caretNear(doc, spans, x, y) {
+  let best = null, bestD = Infinity
+  for (const s of spans) {
+    const r = s.getBoundingClientRect()
+    if (!r.width || !r.height) continue
+    const dx = x < r.left ? r.left - x : x > r.right ? x - r.right : 0
+    const dy = y < r.top ? r.top - y : y > r.bottom ? y - r.bottom : 0
+    const d = dx * dx + dy * dy * 4 // 竖直方向权重大些：行间空隙里优先归到上下最近的行
+    if (d < bestD) { bestD = d; best = [s, r] }
+  }
+  if (!best) return null
+  const [s, r] = best
+  const node = s.firstChild
+  if (!node) return null
+  if (x <= r.left) return { node, offset: 0 }
+  if (x >= r.right) return { node, offset: node.length }
+  const c = doc.caretRangeFromPoint?.(x, (r.top + r.bottom) / 2)
+  if (c?.startContainer === node) return { node, offset: c.startOffset }
+  return { node, offset: Math.round(((x - r.left) / r.width) * node.length) }
+}
+
+function bindSelection(doc, layer, spans) {
+  layer.addEventListener('mousedown', e => {
+    if (e.button !== 0) return
+    const onText = spans.includes(e.target)
+    // 双击 / 三击落在文字上交给浏览器选词、选段；落在空白处什么都不做
+    if (e.detail > 1) { if (!onText) e.preventDefault(); return }
+    const sel = doc.getSelection()
+    if (!sel) return
+    const at = caretNear(doc, spans, e.clientX, e.clientY)
+    if (!at) return
+    e.preventDefault() // 不让浏览器自己定起点；但焦点还是要给书页，键盘翻页才有效
+    doc.defaultView?.focus()
+    let anchor = at
+    if (e.shiftKey && sel.rangeCount && layer.contains(sel.anchorNode)) anchor = { node: sel.anchorNode, offset: sel.anchorOffset }
+    sel.setBaseAndExtent(anchor.node, anchor.offset, at.node, at.offset)
+    const move = ev => {
+      if (!(ev.buttons & 1)) return up()
+      const p = caretNear(doc, spans, ev.clientX, ev.clientY)
+      if (p) sel.setBaseAndExtent(anchor.node, anchor.offset, p.node, p.offset)
+    }
+    const up = () => {
+      doc.removeEventListener('mousemove', move)
+      doc.removeEventListener('mouseup', up)
+    }
+    doc.addEventListener('mousemove', move)
+    doc.addEventListener('mouseup', up)
+  })
 }
 
 export function removeOcrLayer(doc) { doc?.querySelector('.ocrLayer')?.remove() }
