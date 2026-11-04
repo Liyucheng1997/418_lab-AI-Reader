@@ -65,6 +65,15 @@ contextBridge.exposeInMainWorld('api', {
   ttsStatus: cfg => invoke('tts:status', cfg),
   ttsPickFile: kind => invoke('tts:pick-file', kind),
 
+  ocrGet: bookId => invoke('ocr:get', bookId),
+  ocrStart: (bookId, indices, total, front) => invoke('ocr:start', bookId, indices, total, front),
+  ocrStop: bookId => invoke('ocr:stop', bookId),
+  onOcrProgress: fn => {
+    const listener = (_e, ev) => fn(ev)
+    ipcRenderer.on('ocr:progress', listener)
+    return () => ipcRenderer.removeListener('ocr:progress', listener)
+  },
+
   aiModels: cfg => invoke('ai:models', cfg),
   aiChat: (reqId, payload) => invoke('ai:chat', reqId, payload),
   aiAbort: reqId => invoke('ai:abort', reqId),

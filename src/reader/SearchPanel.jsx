@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Search, X } from 'lucide-react'
 
-export default function SearchPanel({ view, book, goTo, onClose }) {
+export default function SearchPanel({ view, book, goTo, onClose, ocrText }) {
   const [query, setQuery] = useState('')
   const [groups, setGroups] = useState([])
   const [progress, setProgress] = useState(null)
@@ -19,7 +19,7 @@ export default function SearchPanel({ view, book, goTo, onClose }) {
       for (let i = 0; i < book.pdf.numPages; i++) {
         if (my !== token.current) return
         const tc = await (await book.pdf.getPage(i + 1)).getTextContent()
-        const text = tc.items.map(x => x.str).join('')
+        const text = tc.items.map(x => x.str).join('').trim() || ocrText?.(i) || '' // 扫描页搜 OCR 识别出的文字
         const lower = text.toLowerCase()
         const items = []
         for (let at = lower.indexOf(needle); at >= 0 && items.length < 20; at = lower.indexOf(needle, at + needle.length)) {

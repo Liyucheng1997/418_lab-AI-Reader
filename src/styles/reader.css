@@ -192,3 +192,7 @@
   .r-panel.right { width: 330px; }
   .r-chapter { display: none; }
 }
+
+/* OCR：后台识别进度（底栏，不打扰阅读） */
+.ocr-status { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-3); white-space: nowrap; }
+.ocr-status .spinner { width: 11px; height: 11px; border-width: 1.5px; }

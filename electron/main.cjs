@@ -7,6 +7,7 @@ const { Store, mergeDeep } = require('./store.cjs')
 const { streamChat, listModels } = require('./ai.cjs')
 const updater = require('./updater.cjs')
 const f5 = require('./tts.cjs')
+const { OcrManager } = require('./ocr.cjs')
 const linked = require('./linked.cjs')
 const covers = require('./covers.cjs')
 
@@ -23,6 +24,7 @@ if (process.env.AIR_USER_DATA) app.setPath('userData', process.env.AIR_USER_DATA
 // 数据位置：书库索引、封面、语音缓存默认在 %APPDATA%（C 盘），可以在设置里换到别的盘；新位置记在默认目录的 location.json
 const DEFAULT_DATA = app.getPath('userData')
 const LOCATION_FILE = path.join(DEFAULT_DATA, 'location.json')
+let missingDataDir = null // 记录的数据位置找不到了（磁盘没接上，或被删了），启动时要问用户
 try {
   const { dataDir } = JSON.parse(fs.readFileSync(LOCATION_FILE, 'utf8'))
   if (dataDir && fs.existsSync(dataDir)) {
@@ -31,11 +33,27 @@ try {
     for (const e of fs.readdirSync(DEFAULT_DATA)) {
       if (!['location.json', 'library', 'tts-cache'].includes(e)) fs.rmSync(path.join(DEFAULT_DATA, e), { recursive: true, force: true, maxRetries: 2 })
     }
-  }
+  } else if (dataDir) missingDataDir = dataDir
 } catch {}
+
+// 安装目录在更新、卸载时会被整个删掉，数据绝不能放在里面
+const INSTALL_DIR = path.dirname(app.getPath('exe'))
+const isInside = (p, dir) => {
+  const r = path.relative(path.resolve(dir).toLowerCase(), path.resolve(p).toLowerCase())
+  return !r || (!r.startsWith('..') && !path.isAbsolute(r))
+}
+function dataTarget(picked) {
+  if (app.isPackaged && isInside(picked, INSTALL_DIR)) {
+    throw new Error(`不能放在程序的安装目录（${INSTALL_DIR}）里：更新或卸载时整个安装目录会被删除。请另选一个文件夹，比如 D:\\AI Reader 数据`)
+  }
+  // 选的是非空文件夹时，在里面建一个“AI Reader 数据”
+  if (fs.existsSync(picked) && fs.readdirSync(picked).length && !fs.existsSync(path.join(picked, 'library', 'library.json'))) return path.join(picked, 'AI Reader 数据')
+  return picked
+}
 if (!app.requestSingleInstanceLock()) app.quit()
 
 let win = null
+let ocr = null
 let store = null
 let LIB_DIR, BOOK_DIR, COVER_DIR
 let pendingFiles = filesFromArgv(process.argv)
@@ -158,6 +176,7 @@ function createWindow() {
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, sandbox: false },
   })
   win.once('ready-to-show', () => win.show())
+  win.on('closed', () => { ocr?.dispose(); app.quit() }) // 后台 OCR 的隐藏窗口不该让程序一直挂着
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:/.test(url)) shell.openExternal(url)
     return { action: 'deny' }
@@ -234,6 +253,7 @@ function setupIpc() {
     for (const b of removed) {
       fs.rmSync(path.join(BOOK_DIR, b.id + '.' + b.format), { force: true })
       fs.rmSync(path.join(COVER_DIR, b.id + '.png'), { force: true })
+      ocr.remove(b.id)
       delete store.data.annotations[b.id]
       store.deleteChat(b.id)
     }
@@ -301,13 +321,11 @@ function setupIpc() {
   h('data:open', () => shell.openPath(app.getPath('userData')))
   h('data:move', async picked => {
     if (!picked) {
-      const res = await dialog.showOpenDialog(win, { title: '选择新的数据位置（建议放在 C 盘以外）', properties: ['openDirectory', 'createDirectory'] })
+      const res = await dialog.showOpenDialog(win, { title: '选择新的数据位置（C 盘以外，且不要放在程序安装目录里）', properties: ['openDirectory', 'createDirectory'] })
       if (res.canceled) return null
       picked = res.filePaths[0]
     }
-    let target = picked
-    // 选的是非空文件夹时，在里面建一个“AI Reader 数据”
-    if (fs.existsSync(target) && fs.readdirSync(target).length && !fs.existsSync(path.join(target, 'library', 'library.json'))) target = path.join(target, 'AI Reader 数据')
+    const target = dataTarget(picked)
     if (path.resolve(target) === path.resolve(app.getPath('userData'))) return null
     await moveDataTo(target)
   })
@@ -420,6 +438,11 @@ function setupIpc() {
   })
   h('ai:abort', reqId => aiJobs.get(reqId)?.abort())
 
+  // PDF 文字识别：indices 为要识别的页（0 起），front 表示当前页、插队优先
+  h('ocr:get', bookId => ocr.status(bookId, true))
+  h('ocr:start', (bookId, indices, total, front) => ocr.request(bookId, `book://file/${encodeURIComponent(bookId)}`, indices, total, front))
+  h('ocr:stop', bookId => ocr.stop(bookId))
+
   h('tts:synth', text => f5.synth(store.data.settings.tts, text))
   h('tts:cancel', () => f5.cancel())
   h('tts:voices', cfg => f5.voices(cfg || store.data.settings.tts))
@@ -519,11 +542,18 @@ async function rescanLinked() {
 }
 
 function setupProtocols() {
-  protocol.handle('app', req => {
+  protocol.handle('app', async req => {
     const { pathname } = new URL(req.url)
     const file = path.normalize(path.join(DIST, decodeURIComponent(pathname)))
     if (!file.startsWith(DIST)) return new Response('forbidden', { status: 403 })
-    return net.fetch(pathToFileURL(file).toString())
+    const res = await net.fetch(pathToFileURL(file).toString())
+    if (pathname === '/index.html') return res // 主窗口不做跨源隔离
+    // OCR 窗口要 crossOriginIsolated 才能多线程跑识别模型；它加载的脚本（含 Worker）也都要带 COEP
+    const headers = new Headers(res.headers)
+    headers.set('Cross-Origin-Embedder-Policy', 'require-corp')
+    headers.set('Cross-Origin-Resource-Policy', 'same-origin')
+    if (pathname === '/ocr.html') headers.set('Cross-Origin-Opener-Policy', 'same-origin')
+    return new Response(res.body, { status: res.status, headers })
   })
   protocol.handle('book', async req => {
     const { host, pathname } = new URL(req.url)
@@ -535,6 +565,7 @@ function setupProtocols() {
     const res = await net.fetch(pathToFileURL(file).toString())
     const headers = new Headers(res.headers)
     headers.set('Access-Control-Allow-Origin', '*')
+    headers.set('Cross-Origin-Resource-Policy', 'cross-origin') // OCR 窗口（跨源隔离）也要能读
     return new Response(res.body, { status: res.status, headers })
   })
 }
@@ -547,12 +578,41 @@ app.on('second-instance', (_e, argv) => {
   if (files.length) win.webContents.send('app:open-files', files)
 })
 
+// 记录的数据位置不见了：别悄悄换成一个空书库，告诉用户并让他选
+function resolveMissingDataDir() {
+  const choice = dialog.showMessageBoxSync({
+    type: 'warning', title: 'AI Reader', noLink: true, defaultId: 0, cancelId: 2,
+    message: '找不到数据文件夹',
+    detail: `之前设置的数据位置不存在了：\n${missingDataDir}\n\n可能是那块磁盘没有接上，或者文件夹被删除了（放在程序安装目录里时，更新或卸载会把它一起删掉）。\n\n如果只是磁盘没接上，请先退出，接上后再打开。`,
+    buttons: ['选择数据位置…', '使用默认位置（C 盘）', '退出'],
+  })
+  if (choice === 2) { app.quit(); return false }
+  if (choice === 1) { fs.rmSync(LOCATION_FILE, { force: true }); return true }
+  const res = dialog.showOpenDialogSync({ title: '选择数据位置（C 盘以外，且不要放在程序安装目录里）', properties: ['openDirectory', 'createDirectory'] })
+  if (res) {
+    try {
+      const target = dataTarget(res[0])
+      fs.mkdirSync(target, { recursive: true })
+      fs.writeFileSync(LOCATION_FILE, JSON.stringify({ dataDir: target }))
+    } catch (e) { dialog.showErrorBox('不能用这个位置', e.message) }
+  }
+  app.relaunch() // 用新位置重新启动；没选或选错了就再问一次
+  app.exit(0)
+  return false
+}
+
 app.whenReady().then(() => {
+  if (missingDataDir && !resolveMissingDataDir()) return
   LIB_DIR = path.join(app.getPath('userData'), 'library')
   BOOK_DIR = path.join(LIB_DIR, 'books')
   COVER_DIR = path.join(LIB_DIR, 'covers')
   for (const d of [BOOK_DIR, COVER_DIR]) fs.mkdirSync(d, { recursive: true })
   store = new Store(LIB_DIR)
+  ocr = new OcrManager({
+    dir: path.join(LIB_DIR, 'ocr'),
+    pageUrl: DEV_URL ? new URL('ocr.html', DEV_URL).href : 'app://bundle/ocr.html',
+    notify: ev => { if (win && !win.isDestroyed()) win.webContents.send('ocr:progress', ev) },
+  })
   setupProtocols()
   setupIpc()
   createWindow()
@@ -565,5 +625,5 @@ app.whenReady().then(() => {
   })
 })
 
-app.on('will-quit', () => { globalShortcut.unregisterAll(); f5.stop(); store?.flush() })
+app.on('will-quit', () => { globalShortcut.unregisterAll(); f5.stop(); ocr?.dispose(); store?.flush() })
 app.on('window-all-closed', () => app.quit())

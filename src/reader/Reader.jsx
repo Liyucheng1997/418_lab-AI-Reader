@@ -8,6 +8,7 @@ import { loadFoliate, openBookRecord } from '../lib/foliate.js'
 import { toast } from '../lib/ui.jsx'
 import { bookCSS, resolveTheme, colorOf, isAppDark } from './theme.js'
 import { Narrator, sentencesFromRange, splitSentences, itemsFrom } from './tts.js'
+import { applyOcrLayer, hasPdfText, usableText, ocrPageText } from './ocrLayer.js'
 import SidePanel from './SidePanel.jsx'
 import SearchPanel from './SearchPanel.jsx'
 import AIPanel from './AIPanel.jsx'
@@ -46,6 +47,70 @@ export default function Reader({ book: record, onClose }) {
   const ttsRef = useRef(lib.settings.tts)
   ttsRef.current = lib.settings.tts
   useEffect(() => { narrator.current?.setRate(lib.settings.tts.rate) }, [lib.settings.tts.rate])
+
+  // ---------- OCR：扫描版、文字乱码的 PDF 在后台自动识别 ----------
+  // 打开书就开始，不用操作：先识别正在看的页，再从这里往后，最后整本书；
+  // 识别好的页铺一层透明文字，可以像普通 PDF 一样选中、复制、高亮、做笔记、朗读、搜索
+  const isPdf = record.format === 'pdf'
+  const ocrRef = useRef({ pages: {} })
+  const [ocr, setOcr] = useState(null) // { total, done, queued, running }
+  const ocrBusy = !!ocr && (ocr.queued > 0 || ocr.running != null)
+  const ocrPages = async (indices, front) => {
+    if (indices.length) setOcr(await window.api.ocrStart(record.id, indices, bookRef.current?.pdf?.numPages, front))
+  }
+  // 正在看的页没有可用文字、也还没识别：插到最前面
+  const ocrVisible = () => {
+    const cs = viewRef.current?.renderer.getContents?.() || []
+    ocrPages(cs.filter(c => c.doc && !hasPdfText(c.doc) && !ocrRef.current.pages[c.index]).map(c => c.index), true)
+  }
+  // 找出全书没有可用文字的页（扫描页、乱码页），从当前页往后陆续排进后台
+  const ocrWholeBook = async () => {
+    const pdf = bookRef.current?.pdf
+    if (!pdf) return
+    const n = pdf.numPages, cur = locRef.current?.index || 0
+    let batch = []
+    for (let k = 0; k < n; k++) {
+      const i = (cur + k) % n
+      if (ocrRef.current.pages[i]) continue
+      try {
+        const tc = await (await pdf.getPage(i + 1)).getTextContent()
+        if (!usableText(tc.items.map(x => x.str).join(''))) batch.push(i)
+      } catch { continue }
+      if (batch.length >= 10) { ocrPages(batch, false); batch = [] } // 边查边排，第一批马上开始
+    }
+    ocrPages(batch, false)
+  }
+  useEffect(() => {
+    if (!isPdf || !ready) return
+    let alive = true
+    window.api.ocrGet(record.id).then(({ pages, ...st }) => {
+      if (!alive) return
+      ocrRef.current.pages = pages || {}
+      setOcr(st)
+      redrawPdfHighlights()
+      setTimeout(() => { if (alive) { ocrVisible(); ocrWholeBook() } }, 800) // pdf.js 的文字层是异步画的
+    })
+    const off = window.api.onOcrProgress(({ bookId, index, page, error, stopped, ...st }) => {
+      if (bookId !== record.id) return
+      if (page) {
+        ocrRef.current.pages[index] = page
+        for (const c of viewRef.current?.renderer.getContents?.() || []) if (c.index === index && c.doc) drawPdfHighlights(c.doc, c.index)
+      }
+      if (error) console.warn(`第 ${index + 1} 页识别失败`, error)
+      setOcr(st)
+    })
+    return () => { alive = false; off() }
+  }, [ready])
+  // 朗读扫描页时等它识别完；顺便把后面两页排上
+  const waitOcr = indices => new Promise(resolve => {
+    const need = indices.filter(i => !ocrRef.current.pages[i])
+    if (!need.length) return resolve()
+    const timer = setTimeout(() => { off(); resolve() }, 120000)
+    const off = window.api.onOcrProgress(() => {
+      if (need.every(i => ocrRef.current.pages[i])) { clearTimeout(timer); off(); resolve() }
+    })
+    ocrPages(need, true)
+  })
 
   // ---------- 标注持久化 ----------
   const saveAnns = useCallback(list => {
@@ -118,6 +183,7 @@ export default function Reader({ book: record, onClose }) {
     const th = resolveTheme(r.bg, darkRef.current)
     if (view.isFixedLayout) {
       view.renderer.setAttribute('zoom', r.pdfZoom)
+      for (const c of view.renderer.getContents?.() || []) if (c.doc) tintPdfPage(c.doc)
     } else {
       view.renderer.setStyles?.(bookCSS(r, th))
       view.renderer.setAttribute('flow', r.flow)
@@ -128,6 +194,20 @@ export default function Reader({ book: record, onClose }) {
     }
   }, [])
   useEffect(() => { applyLayout() }, [rs, applyLayout, appDark])
+
+  // PDF 页面是画在白纸上的图片：在页面里用“正片叠底”把白纸染成所选的背景色，文字不变
+  // （夜间模式另外整体反色，这里不染）
+  function tintPdfPage(doc) {
+    const th = resolveTheme(rsRef.current.bg, darkRef.current)
+    let st = doc.getElementById('air-paper')
+    if (!st) {
+      st = doc.createElement('style')
+      st.id = 'air-paper'
+      ;(doc.head || doc.documentElement).append(st)
+    }
+    st.textContent = th.dark || th.bg.toLowerCase() === '#ffffff' ? ''
+      : `html, body { background: ${th.bg} !important; } canvas { mix-blend-mode: multiply; }`
+  }
 
   // ---------- 位置与进度 ----------
   const progressTimer = useRef()
@@ -152,6 +232,7 @@ export default function Reader({ book: record, onClose }) {
     clearTimeout(progressTimer.current)
     progressTimer.current = setTimeout(flushProgress, 800)
     if (viewRef.current?.isFixedLayout) setTimeout(redrawPdfHighlights, 60)
+    if (isPdf) setTimeout(ocrVisible, 800) // 翻到还没识别的扫描页：优先识别（文字层是异步画的，稍等再判断）
   }
 
   // ---------- 书页内事件 ----------
@@ -163,7 +244,10 @@ export default function Reader({ book: record, onClose }) {
     doc.addEventListener('click', ev => onDocClick(ev, doc))
     doc.addEventListener('dblclick', ev => onDocDblClick(ev, doc))
     doc.addEventListener('contextmenu', ev => { if (!doc.getSelection()?.isCollapsed) ev.preventDefault() })
-    if (viewRef.current?.isFixedLayout) setTimeout(() => drawPdfHighlights(doc, index), 80)
+    if (viewRef.current?.isFixedLayout) {
+      tintPdfPage(doc)
+      setTimeout(() => drawPdfHighlights(doc, index), 80)
+    }
   }
 
   const frameRect = (doc, rect) => {
@@ -289,6 +373,7 @@ export default function Reader({ book: record, onClose }) {
 
   // ---------- PDF 高亮（固定版式没有 overlayer，自己画） ----------
   const drawPdfHighlights = (doc, index) => {
+    applyOcrLayer(doc, ocrRef.current.pages?.[index]) // 扫描页：先铺 OCR 文字，高亮才找得到位置
     doc.getElementById('air-hl')?.remove()
     const list = annsRef.current.filter(a => a.type === 'highlight' && a.index === index)
     if (!list.length || !doc.body) return
@@ -400,7 +485,8 @@ export default function Reader({ book: record, onClose }) {
     const l = locRef.current
     if (l?.range) return l.range.toString()
     return (view?.renderer.getContents?.() || [])
-      .map(c => c.doc?.querySelector('.textLayer')?.textContent || c.doc?.body?.textContent || '').join('\n')
+      .map(c => [...(c.doc?.querySelectorAll('.textLayer') || [])].filter(x => x.style.display !== 'none').map(x => x.textContent).join('') // 含 OCR 文字层
+        || ocrPageText(ocrRef.current.pages?.[c.index]) || c.doc?.body?.textContent || '').join('\n')
   }
   const getChapterText = async limit => {
     const view = viewRef.current
@@ -412,7 +498,7 @@ export default function Reader({ book: record, onClose }) {
       let total = 0
       for (let i = Math.max(0, l.index - 1); i < book.pdf.numPages && total < limit; i++) {
         const tc = await (await book.pdf.getPage(i + 1)).getTextContent()
-        const t = tc.items.map(x => x.str + (x.hasEOL ? '\n' : '')).join('')
+        const t = tc.items.map(x => x.str + (x.hasEOL ? '\n' : '')).join('').trim() || ocrPageText(ocrRef.current.pages?.[i]) // 扫描页用 OCR 结果
         pages.push(`[第 ${i + 1} 页]\n${t}`)
         total += t.length
         if (i > l.index + 6) break
@@ -446,14 +532,23 @@ export default function Reader({ book: record, onClose }) {
   }
   const pageItems = async () => {
     const view = viewRef.current
+    if (isPdf) {
+      // 扫描页没有文字：先识别再读
+      const cs = view.renderer.getContents?.() || []
+      if (cs.some(c => c.doc && !hasPdfText(c.doc) && !ocrRef.current.pages[c.index])) {
+        await waitOcr(cs.map(c => c.index))
+        redrawPdfHighlights()
+      }
+    }
     if (view?.isFixedLayout) {
       const out = []
       for (const c of view.renderer.getContents?.() || []) {
-        const layer = c.doc?.querySelector('.textLayer')
-        if (!layer) continue
-        const r = c.doc.createRange()
-        r.selectNodeContents(layer)
-        out.push(...sentencesFromRange(r, { openTail: true }))
+        for (const layer of c.doc?.querySelectorAll('.textLayer') || []) { // PDF 自带的文字层，或 OCR 文字层
+          if (!layer.textContent.trim() || layer.style.display === 'none') continue // 被 OCR 替换掉的乱码层不读
+          const r = c.doc.createRange()
+          r.selectNodeContents(layer)
+          out.push(...sentencesFromRange(r, { openTail: true }))
+        }
       }
       if (out.length) return out
     }
@@ -614,7 +709,8 @@ export default function Reader({ book: record, onClose }) {
           {typeOpen && <TypeSettings isFixed={isFixed} onClose={() => setTypeOpen(false)} />}
         </div>
         {right === 'search' && (
-          <SearchPanel view={viewRef.current} book={bookRef.current} goTo={goTo} onClose={() => setRight(null)} />
+          <SearchPanel view={viewRef.current} book={bookRef.current} goTo={goTo} onClose={() => setRight(null)}
+            ocrText={i => ocrPageText(ocrRef.current.pages?.[i])} />
         )}
         {right === 'ai' && (
           <AIPanel record={record} request={aiRequest} onRequestHandled={() => setAiRequest(null)} getPageText={getPageText} getChapterText={getChapterText}
@@ -630,6 +726,11 @@ export default function Reader({ book: record, onClose }) {
           onChange={e => setScrub(+e.target.value)}
           onPointerUp={() => { if (scrub != null) { viewRef.current?.goToFraction(scrub); setScrub(null) } }}
           onKeyUp={() => { if (scrub != null) { viewRef.current?.goToFraction(scrub); setScrub(null) } }} />
+        {ocrBusy && (
+          <span className="ocr-status tabular" title="扫描页在后台识别文字，识别好的页可以直接选中、复制">
+            <span className="spinner" />识别文字 · 还剩 {ocr.queued + (ocr.running != null ? 1 : 0)} 页
+          </span>
+        )}
         <span className="r-pct tabular">
           {isFixed && loc ? `${loc.index + 1} / ${loc.sectionTotal ?? '?'} 页 · ` : loc?.location ? `${loc.location.current + 1} / ${loc.location.total} · ` : ''}
           {pct}%

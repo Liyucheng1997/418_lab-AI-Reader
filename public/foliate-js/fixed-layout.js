@@ -86,6 +86,7 @@ export class FixedLayout extends HTMLElement {
         iframe.setAttribute('sandbox', 'allow-same-origin allow-scripts')
         iframe.setAttribute('scrolling', 'no')
         iframe.setAttribute('part', 'filter')
+        if (index != null) iframe.dataset.index = index // AI Reader：getContents 要带上页序号（PDF 高亮、OCR 按页处理）
         this.#root.append(element)
         if (!src) return { blank: true, element, iframe }
         return new Promise(resolve => {
@@ -306,9 +307,9 @@ export class FixedLayout extends HTMLElement {
         if (!s) return this.goToSpread(this.#index - 1, this.rtl ? 'left' : 'right', 'page')
     }
     getContents() {
-        return Array.from(this.#root.querySelectorAll('iframe'), frame => ({
+        return Array.from(this.#root.querySelectorAll('iframe[data-index]'), frame => ({
             doc: frame.contentDocument,
-            // TODO: index, overlayer
+            index: Number(frame.dataset.index),
         }))
     }
     destroy() {
