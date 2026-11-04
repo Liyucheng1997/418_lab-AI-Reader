@@ -372,8 +372,12 @@ export default function Reader({ book: record, onClose }) {
   }, [])
 
   // ---------- PDF 高亮（固定版式没有 overlayer，自己画） ----------
-  const drawPdfHighlights = (doc, index) => {
-    applyOcrLayer(doc, ocrRef.current.pages?.[index]) // 扫描页：先铺 OCR 文字，高亮才找得到位置
+  const drawPdfHighlights = (doc, index, tries = 0) => {
+    // 扫描页：先铺 OCR 文字，高亮才找得到位置；页面还没画完就稍后再来
+    if (!applyOcrLayer(doc, ocrRef.current.pages?.[index])) {
+      if (tries < 20) setTimeout(() => { if (doc.defaultView) drawPdfHighlights(doc, index, tries + 1) }, 250)
+      return
+    }
     doc.getElementById('air-hl')?.remove()
     const list = annsRef.current.filter(a => a.type === 'highlight' && a.index === index)
     if (!list.length || !doc.body) return
