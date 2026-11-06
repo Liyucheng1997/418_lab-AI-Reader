@@ -1,7 +1,7 @@
 {
   "name": "ai-reader",
   "productName": "AI Reader",
-  "version": "1.4.2",
+  "version": "1.4.3",
   "description": "简约阅读器：EPUB / PDF / TXT / MOBI / AZW3，多级文件夹书库，AI 辅助阅读",
   "main": "electron/main.cjs",
   "author": "liyucheng",
