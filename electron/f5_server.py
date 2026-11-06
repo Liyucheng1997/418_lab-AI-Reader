@@ -23,6 +23,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import numpy as np
 import soundfile as sf
 
+from tts_text import make_pinyin_converter, normalize_text
+
 ARGS = None
 _model = None
 _model_lock = threading.Lock()
@@ -71,6 +73,15 @@ def _patch_transcribe():
         pass
 
 
+def _patch_pinyin(model):
+    """F5 把词表里没有的拼音当成空白：轻声的“这个 ge”“意思 si”“差不多 bu”整字被吞，换成能读出来的。"""
+    try:
+        from f5_tts.infer import utils_infer
+        utils_infer.convert_char_to_pinyin = make_pinyin_converter(set(model.ema_model.vocab_char_map))
+    except Exception:
+        pass
+
+
 def _get_model():
     global _model
     if _model is not None:
@@ -87,6 +98,7 @@ def _get_model():
             device = "cuda" if torch.cuda.is_available() else "cpu"
             _status["device"] = torch.cuda.get_device_name(0) if device == "cuda" else "CPU"
             _model = F5TTS(model="F5TTS_v1_Base", device=device)
+            _patch_pinyin(_model)
             _status["loaded"] = True
             _status["error"] = None
         except Exception as e:
@@ -153,6 +165,7 @@ _epoch = 0  # 朗读位置变了（跳转 / 停止）客户端会换新的 epoch
 def synth(text, ref_audio, ref_text, epoch=0):
     global _epoch
     _epoch = max(_epoch, epoch)
+    text = normalize_text(text)  # 数字、轻声、兼容区汉字等 F5 读不出或读错的，先改写
     if not ref_audio:
         voices = list_voices()
         if not voices:
