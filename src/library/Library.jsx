@@ -7,6 +7,7 @@ import { useLib } from '../App.jsx'
 import { openMenu, Modal } from '../lib/ui.jsx'
 import { coverURL } from '../lib/foliate.js'
 import Sidebar from './Sidebar.jsx'
+import Discover from './Discover.jsx'
 import {
   filterBooks, sortBooks, folderPath, childrenOf, countIn, FORMAT_LABEL, formatDate, pct,
 } from './model.js'
@@ -131,6 +132,7 @@ export default function Library() {
           {lib.parsing > 0 && <span className="parse-tip"><span className="spinner" />正在读取封面…</span>}
         </div>
 
+        {view.type === 'discover' ? <Discover /> : <>
         <div className="lib-head">
           <div className="titles">
             <div className="crumbs">
@@ -201,6 +203,7 @@ export default function Library() {
             <button className="icon-btn" title="取消选择" onClick={() => setSel([])}><X size={16} /></button>
           </div>
         )}
+        </>}
         {fileDrop && (
           <div className="drop-overlay"><Download size={30} />松开即可导入{title && view.type === 'folder' ? `到“${title}”` : ''}</div>
         )}

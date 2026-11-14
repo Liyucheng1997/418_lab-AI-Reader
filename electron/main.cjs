@@ -4,12 +4,13 @@ const fs = require('fs')
 const crypto = require('crypto')
 const { pathToFileURL } = require('url')
 const { Store, mergeDeep } = require('./store.cjs')
-const { streamChat, listModels } = require('./ai.cjs')
+const { streamChat, listModels, subscriptionStatus } = require('./ai.cjs')
 const updater = require('./updater.cjs')
 const f5 = require('./tts.cjs')
 const { OcrManager } = require('./ocr.cjs')
 const linked = require('./linked.cjs')
 const covers = require('./covers.cjs')
+const rec = require('./recommend.cjs')
 
 const SUPPORTED = ['epub', 'pdf', 'txt', 'mobi', 'azw3', 'azw', 'fb2', 'fbz', 'cbz']
 const DEV_URL = process.env.VITE_DEV_URL
@@ -421,6 +422,7 @@ function setupIpc() {
   h('update:install', () => updater.installNow())
 
   h('ai:models', cfg => listModels(cfg))
+  h('ai:sub-status', () => subscriptionStatus())
   ipcMain.handle('ai:chat', async (e, reqId, payload) => {
     const ctrl = new AbortController()
     aiJobs.set(reqId, ctrl)
@@ -437,6 +439,87 @@ function setupIpc() {
     }
   })
   h('ai:abort', reqId => aiJobs.get(reqId)?.abort())
+
+  // ---------- 为你推荐 ----------
+  // store.data.recs = { at, wish, items, dismissed: [书名], shown: [书名] }
+  // store.data.recs.lib = { at, wish, items: [{ bookId, reason }] }：AI 从书库里精选的结果；libDismissed：书库推荐里点了“不感兴趣”的书
+  const recState = () => {
+    const st = (store.data.recs ||= { at: 0, wish: '', items: [], dismissed: [], shown: [] })
+    st.lib ||= { at: 0, wish: '', items: [] }
+    st.libDismissed ||= []
+    return st
+  }
+  const libPicks = poolSize => rec.libraryPicks(store.data.books, store.data.folders, store.data.annotations,
+    { dismissed: recState().libDismissed, poolSize })
+  const recSnapshot = () => {
+    const { pool: _p, profile, ...local } = libPicks(0)
+    return { ...recState(), profile, local }
+  }
+  h('rec:get', () => recSnapshot())
+  h('rec:lib-ai', async wish => {
+    const st = recState()
+    try {
+      const { pool, profile } = libPicks(150)
+      if (!pool.length) return { ok: true, ...recSnapshot() }
+      const items = await rec.askLibraryAI(streamChat, store.data.settings.ai, profile, pool, { wish: (wish || '').trim(), count: 12 })
+      st.lib = { at: now(), wish: (wish || '').trim(), items }
+      store.save()
+      return { ok: true, ...recSnapshot() }
+    } catch (err) {
+      return { ok: false, error: err?.message || String(err) }
+    }
+  })
+  h('rec:lib-dismiss', bookId => {
+    const st = recState()
+    st.libDismissed = [...st.libDismissed.filter(x => x !== bookId), bookId].slice(-500)
+    st.lib.items = st.lib.items.filter(x => x.bookId !== bookId)
+    store.save()
+    return recSnapshot()
+  })
+  h('rec:refresh', async wish => {
+    const st = recState()
+    const profile = rec.buildProfile(store.data.books, store.data.annotations)
+    try {
+      const avoid = [...new Set([...st.dismissed, ...st.shown])].slice(-80)
+      let items = await rec.askAI(streamChat, store.data.settings.ai, profile, { wish: (wish || '').trim(), avoid, count: 14 })
+      items = items.filter(it => !rec.inLibrary(it, store.data.books)).slice(0, 12)
+      await rec.enrich(webFetch, items, store.data.settings.googleBooksKey)
+      items.forEach(it => { it.id = crypto.randomUUID() })
+      Object.assign(st, {
+        at: now(), wish: (wish || '').trim(), items,
+        shown: [...st.shown, ...items.map(it => it.title)].slice(-200),
+      })
+      store.save()
+      return { ok: true, ...recSnapshot() }
+    } catch (err) {
+      return { ok: false, error: err?.message || String(err) }
+    }
+  })
+  h('rec:dismiss', id => {
+    const st = recState()
+    const it = st.items.find(x => x.id === id)
+    if (it) { st.items = st.items.filter(x => x !== it); st.dismissed = [...st.dismissed, it.title].slice(-200) }
+    store.save()
+    return st.items
+  })
+  // 只下载这里自己查出来的 Project Gutenberg 地址
+  h('rec:download', async id => {
+    const it = recState().items.find(x => x.id === id)
+    if (!it?.free || !rec.GUTENBERG_HOST.test(it.free.url)) throw new Error('这本书没有可用的免费版本')
+    const res = await webFetch(it.free.url, { headers: { 'User-Agent': 'AI-Reader' } })
+    if (!res.ok) throw new Error(`下载失败（HTTP ${res.status}）`)
+    const buf = Buffer.from(await res.arrayBuffer())
+    if (buf.length < 1024 || buf.subarray(0, 2).toString() !== 'PK') throw new Error('下载到的不是 EPUB 文件')
+    const name = `${(it.originalTitle || it.title).replace(/[\\/:*?"<>|]+/g, ' ').trim().slice(0, 80)}.epub`
+    const tmpDir = fs.mkdtempSync(path.join(app.getPath('temp'), 'aireader-'))
+    const file = path.join(tmpDir, name)
+    try {
+      fs.writeFileSync(file, buf)
+      const r = importFile(file, null)
+      it.bookId = r.book.id
+      return { ...summarize([r]), bookId: r.book.id }
+    } finally { fs.rmSync(tmpDir, { recursive: true, force: true }) }
+  })
 
   // PDF 文字识别：indices 为要识别的页（0 起），front 表示当前页、插队优先
   h('ocr:get', bookId => ocr.status(bookId, true))

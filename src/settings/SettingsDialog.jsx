@@ -218,6 +218,8 @@ function AI() {
   const [showKey, setShowKey] = useState(false)
   const [models, setModels] = useState([])
   const [status, setStatus] = useState(null)
+  const [sub, setSub] = useState(null) // 本机 Claude Code 的登录状态
+  useEffect(() => { window.api.aiSubStatus().then(setSub, () => setSub({ found: false })) }, [])
   const preset = PROVIDERS.find(p => p.id === cfg.provider) || PROVIDERS.at(-1)
   const set = patch => { setCfg(c => ({ ...c, ...patch })); setStatus(null) }
   const pickProvider = id => {
@@ -241,7 +243,52 @@ function AI() {
     <>
       <div className="eyebrow">AI ASSISTANT</div>
       <h2>AI 助手</h2>
-      <div className="set-hint">填入你自己的 API Key 后，阅读时可以让 AI 解释、翻译、总结、答疑。Key 只保存在本机。</div>
+      <div className="set-hint">阅读时可以让 AI 解释、翻译、总结、答疑，“为你推荐”也用它。可以用 Claude 订阅，也可以填自己的 API Key（只保存在本机）。</div>
+      <div className="set-card">
+        <div className="set-row">
+          <span className="k">Claude 订阅</span>
+          <div className="v">
+            <label className="form-check">
+              <input type="checkbox" checked={!!cfg.useSubscription} onChange={e => set({ useSubscription: e.target.checked })} />
+              优先使用本机 Claude Code 登录的 claude.ai 订阅（Pro / Max），不消耗 API 额度
+            </label>
+          </div>
+        </div>
+        {cfg.useSubscription && (
+          <>
+            <div className="set-row">
+              <span className="k">状态</span>
+              <div className="v">
+                {!sub ? <span className="muted">检查中…</span>
+                  : !sub.found ? <span className="status-line err">没有找到 Claude Code，请先安装并在终端运行 claude 登录</span>
+                  : !sub.loggedIn ? <span className="status-line err">Claude Code 还没登录，请在终端运行 claude 登录 claude.ai 账号</span>
+                  : <span className="status-line ok">已登录 claude.ai{sub.subscription ? `（${sub.subscription[0].toUpperCase() + sub.subscription.slice(1)} 订阅）` : ''}</span>}
+              </div>
+            </div>
+            <div className="set-row">
+              <span className="k">订阅模型</span>
+              <div className="v">
+                <select className="input" value={cfg.subModel || ''} onChange={e => set({ subModel: e.target.value })}>
+                  <option value="">跟随 Claude Code 默认</option>
+                  <option value="opus">Opus（最强）</option>
+                  <option value="sonnet">Sonnet（均衡）</option>
+                  <option value="haiku">Haiku（最快、最省额度）</option>
+                </select>
+              </div>
+            </div>
+            <div className="set-row">
+              <span className="k">额度用完时</span>
+              <div className="v">
+                <label className="form-check">
+                  <input type="checkbox" checked={!!cfg.subFallback} onChange={e => set({ subFallback: e.target.checked })} />
+                  订阅不可用或额度用完时，改用下面的 API Key
+                </label>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+      <div className="set-hint">{cfg.useSubscription ? '下面的 API Key 可选，只在订阅不可用时备用。' : '填入你自己的 API Key 后即可使用 AI。'}</div>
       <div className="set-card">
         <div className="set-row">
           <span className="k">服务商</span>

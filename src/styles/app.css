@@ -216,3 +216,46 @@
 .where-inline.cloud { background: rgba(10, 132, 255, 0.14); color: var(--primary); }
 /* 几千本书时只渲染看得见的卡片 */
 .book-card { content-visibility: auto; contain-intrinsic-size: auto 260px; }
+
+/* ---------- 为你推荐 ---------- */
+.lib-sub .link { cursor: pointer; color: var(--primary); }
+.rec-basis-toggle { display: inline-flex; align-items: center; gap: 2px; margin-left: 10px; }
+.rec-basis { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 16px; animation: fadeIn 0.15s; }
+.rec-chip { height: 26px; display: inline-flex; align-items: center; gap: 6px; padding: 0 10px; border-radius: 99px; background: var(--fill); font-size: 12px; color: var(--text); }
+.rec-chip em { font-style: normal; color: var(--text-3); }
+.rec-ask { display: flex; align-items: center; gap: 10px; height: 48px; padding: 0 6px 0 16px; border-radius: 99px; background: var(--panel); box-shadow: var(--shadow-card); margin-bottom: 18px; max-width: 760px; }
+.rec-ask .ico { color: var(--primary); flex-shrink: 0; }
+.rec-ask input { flex: 1; min-width: 0; height: 100%; border: 0; outline: none; background: transparent; font-size: 14px; color: var(--text); }
+.rec-ask .btn { flex-shrink: 0; }
+.rec-ask .spinner { width: 14px; height: 14px; border-width: 2px; border-color: rgba(255, 255, 255, 0.35); border-top-color: #fff; }
+.rec-note { font-size: 13px; color: var(--text-2); margin: -6px 0 16px 16px; }
+.rec-note .link { color: var(--primary); cursor: pointer; margin-left: 6px; }
+.rec-note.error { color: var(--danger); }
+.rec-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 16px; transition: opacity 0.2s; }
+.rec-grid.dim { opacity: 0.45; pointer-events: none; }
+.rec-card { display: flex; gap: 16px; padding: 16px; border-radius: var(--r-lg); background: var(--panel); box-shadow: var(--shadow-card); animation: riseIn 0.35s var(--ease-out) both; min-width: 0; }
+.rec-cover { position: relative; width: 92px; flex-shrink: 0; aspect-ratio: 3 / 4.2; align-self: flex-start; border-radius: 6px; overflow: hidden; background: var(--fill); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06), 0 6px 18px rgba(0, 0, 0, 0.08); }
+.rec-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.rec-cover .cover-ph { padding: 10px 8px; }
+.rec-cover .cover-ph .ph-title { font-size: 12px; }
+.rec-info { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.rec-top { display: flex; align-items: flex-start; gap: 6px; }
+.rec-title { flex: 1; font-size: 15.5px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.35; word-break: break-word; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.rec-x { margin: -4px -6px 0 0; color: var(--text-3); opacity: 0; transition: opacity 0.15s; }
+.rec-card:hover .rec-x { opacity: 1; }
+.rec-meta { margin-top: 3px; font-size: 12.5px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rec-orig { color: var(--text-3); font-style: italic; }
+.rec-tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+.rec-tag { height: 20px; display: inline-flex; align-items: center; padding: 0 8px; border-radius: 99px; background: var(--fill); font-size: 11px; color: var(--text-2); }
+.rec-tag.explore { background: var(--primary-soft); color: var(--primary); font-weight: 500; }
+.rec-reason { margin-top: 8px; font-size: 13px; line-height: 1.65; color: var(--text); flex: 1; }
+.rec-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.rec-actions .spinner { width: 12px; height: 12px; border-width: 2px; border-color: rgba(255, 255, 255, 0.35); border-top-color: #fff; }
+.rec-section-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin: 26px 0 12px; }
+.rec-section-title { font-size: 19px; font-weight: 600; letter-spacing: -0.02em; }
+.rec-section-sub { margin-top: 3px; font-size: 12.5px; color: var(--text-3); }
+.rec-section-head .seg button { height: 26px; padding: 0 12px; font-size: 12px; }
+.rec-empty { display: flex; align-items: center; gap: 8px; padding: 18px 20px; border-radius: var(--r-lg); background: var(--panel); box-shadow: var(--shadow-card); font-size: 13px; color: var(--text-2); }
+.rec-empty .ico { color: var(--primary); flex-shrink: 0; }
+.rec-cover.clickable { cursor: pointer; }
+.rec-cover > img { width: 100%; height: 100%; object-fit: cover; display: block; }

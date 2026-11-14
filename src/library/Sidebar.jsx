@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import {
   Library as LibIcon, Clock, Star, Inbox, FileText, Folder, FolderOpen, ChevronRight, Plus,
-  Settings, Moon, Sun, BookOpen, CheckCircle2, Sparkles, Cloud, HardDrive, FolderSync,
+  Settings, Moon, Sun, BookOpen, CheckCircle2, Sparkles, Cloud, HardDrive, FolderSync, Compass,
 } from 'lucide-react'
 import { useLib } from '../App.jsx'
 import { openMenu, toast } from '../lib/ui.jsx'
@@ -41,6 +41,7 @@ export default function Sidebar({ view, setView }) {
         <div className="sb-group" style={{ marginTop: 4 }}>
           <Item v={{ type: 'all' }} icon={LibIcon} label="全部图书" count={books.length} />
           <Item v={{ type: 'recent' }} icon={Clock} label="最近阅读" />
+          <Item v={{ type: 'discover' }} icon={Compass} label="为你推荐" />
           <Item v={{ type: 'favorite' }} icon={Star} label="收藏" count={books.filter(b => b.favorite).length || null} />
           <Item v={{ type: 'unfiled' }} icon={Inbox} label="未分类" count={books.filter(b => !b.folders.length).length || null} />
         </div>

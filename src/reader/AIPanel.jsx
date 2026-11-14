@@ -4,6 +4,7 @@ import DOMPurify from 'dompurify'
 import { Sparkles, X, Trash2, Settings, ArrowUp, Square, Copy, NotebookPen, RotateCcw, Quote, KeyRound } from 'lucide-react'
 import { useLib } from '../App.jsx'
 import { toast, confirmDialog } from '../lib/ui.jsx'
+import { aiReady, aiLabel } from '../lib/ai.js'
 
 const uid = () => Math.random().toString(36).slice(2, 10)
 
@@ -63,7 +64,7 @@ export default function AIPanel({ record, request, onRequestHandled, getPageText
     handled.current = request.id
     onRequestHandled()
     const q = { text: request.text, cfi: request.cfi, index: request.index }
-    if (!ai.apiKey) { setQuote(q); return }
+    if (!aiReady(ai)) { setQuote(q); return }
     send({ action: request.action, quote: q })
   }, [request, loaded])
 
@@ -139,7 +140,7 @@ export default function AIPanel({ record, request, onRequestHandled, getPageText
       <div className="r-panel-head">
         <span className="ai-mark"><Sparkles size={14} strokeWidth={2.2} /></span>
         <span className="panel-title">AI 助手</span>
-        {ai.apiKey && <span className="model-chip" title={ai.model}>{ai.model || provider}</span>}
+        {aiReady(ai) && <span className="model-chip" title={aiLabel(ai)}>{aiLabel(ai) || provider}</span>}
         <span style={{ flex: 1 }} />
         <button className="icon-btn" title="清空对话" onClick={clear} disabled={!msgs.length || !!busy}><Trash2 size={15} /></button>
         <button className="icon-btn" title="AI 设置" onClick={() => lib.openSettings('ai')}><Settings size={15} /></button>
@@ -147,15 +148,15 @@ export default function AIPanel({ record, request, onRequestHandled, getPageText
       </div>
 
       <div className="ai-list" ref={listRef}>
-        {!ai.apiKey && (
+        {!aiReady(ai) && (
           <div className="ai-setup">
             <div className="confirm-icon"><KeyRound size={22} strokeWidth={1.8} /></div>
             <div className="confirm-title">先配置 AI</div>
-            <div className="confirm-msg">填入 Claude、DeepSeek、通义千问等任一服务的 API Key，就能让 AI 帮你解释、翻译、总结。</div>
+            <div className="confirm-msg">可以直接用本机 Claude Code 登录的 Claude 订阅，或填入 Claude、DeepSeek、通义千问等任一服务的 API Key，就能让 AI 帮你解释、翻译、总结。</div>
             <button className="btn btn-primary" onClick={() => lib.openSettings('ai')}>打开 AI 设置</button>
           </div>
         )}
-        {ai.apiKey && !msgs.length && (
+        {aiReady(ai) && !msgs.length && (
           <div className="ai-welcome">
             <div className="hello">读到哪里，问到哪里。</div>
             <div className="muted">选中书中文字可以直接让我解释或翻译；也可以试试：</div>
@@ -190,7 +191,7 @@ export default function AIPanel({ record, request, onRequestHandled, getPageText
         ))}
       </div>
 
-      {ai.apiKey && msgs.length > 0 && (
+      {aiReady(ai) && msgs.length > 0 && (
         <div className="quick-row">
           {QUICK.map(([k, l]) => <button key={k} className="chip" disabled={!!busy} onClick={() => send({ action: k })}>{l}</button>)}
         </div>
@@ -202,7 +203,7 @@ export default function AIPanel({ record, request, onRequestHandled, getPageText
             <button className="icon-btn mini" onClick={() => setQuote(null)}><X size={12} /></button>
           </div>
         )}
-        <textarea ref={inputRef} rows={2} value={input} disabled={!ai.apiKey}
+        <textarea ref={inputRef} rows={2} value={input} disabled={!aiReady(ai)}
           placeholder={quote ? '针对这段文字提问…' : '问点什么，回车发送，Shift + 回车换行'}
           onChange={e => setInput(e.target.value)}
           onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); submit() } }} />
@@ -216,7 +217,7 @@ export default function AIPanel({ record, request, onRequestHandled, getPageText
           {busy ? (
             <button className="send stop" title="停止" onClick={() => window.api.aiAbort(busy)}><Square size={12} fill="currentColor" /></button>
           ) : (
-            <button className="send" title="发送" disabled={!input.trim() || !ai.apiKey} onClick={submit}><ArrowUp size={16} strokeWidth={2.4} /></button>
+            <button className="send" title="发送" disabled={!input.trim() || !aiReady(ai)} onClick={submit}><ArrowUp size={16} strokeWidth={2.4} /></button>
           )}
         </div>
       </div>

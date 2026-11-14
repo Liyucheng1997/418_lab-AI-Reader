@@ -39,6 +39,9 @@ const DEFAULT_SETTINGS = {
     model: 'claude-opus-5-5',
     targetLang: '中文',
     contextChars: 12000,
+    useSubscription: true, // 优先用本机 Claude Code 登录的 claude.ai 订阅，不消耗 API 额度
+    subModel: '', // 订阅用的模型：留空跟随 Claude Code 默认，或 opus / sonnet / haiku
+    subFallback: true, // 订阅不可用或额度用完时改用 API Key
   },
 }
 

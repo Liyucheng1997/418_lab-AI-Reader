@@ -74,7 +74,15 @@ contextBridge.exposeInMainWorld('api', {
     return () => ipcRenderer.removeListener('ocr:progress', listener)
   },
 
+  recGet: () => invoke('rec:get'),
+  recRefresh: wish => invoke('rec:refresh', wish),
+  recDismiss: id => invoke('rec:dismiss', id),
+  recDownload: id => invoke('rec:download', id),
+  recLibAI: wish => invoke('rec:lib-ai', wish),
+  recLibDismiss: bookId => invoke('rec:lib-dismiss', bookId),
+
   aiModels: cfg => invoke('ai:models', cfg),
+  aiSubStatus: () => invoke('ai:sub-status'),
   aiChat: (reqId, payload) => invoke('ai:chat', reqId, payload),
   aiAbort: reqId => invoke('ai:abort', reqId),
   onAiDelta: fn => {
