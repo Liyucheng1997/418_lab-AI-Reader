@@ -12,7 +12,7 @@ const search = {
 }
 
 // 为你推荐：上半部分从书库里没读的书中挑（本地算法，填了 API Key 还可以让 AI 精选）；
-// 下半部分是 AI 推荐的书库外的书，公版书可从 Project Gutenberg 免费下载进书库
+// 下半部分是 AI 推荐的书库外的书，通过配置的 Z-Library 书源下载入库
 export default function Discover() {
   const lib = useLib()
   const [data, setData] = useState(null)
@@ -24,7 +24,7 @@ export default function Discover() {
   const hasKey = aiReady(lib.settings.ai)
   const busy = loading.lib || loading.ext
 
-  useEffect(() => { window.api.recGet().then(d => { setData(d); setWish(d.wish || d.lib?.wish || '') }) }, [])
+  useEffect(() => { window.api.recGet().then(d => { setData(d); setWish(w => w || d.wish || d.lib?.wish || '') }) }, [lib.settings])
 
   // 书库精选和书库外推荐同时请求，哪个先好就先显示哪个（书库外还要联网查封面，通常慢一些）
   const refresh = async () => {
@@ -128,9 +128,10 @@ export default function Discover() {
           <div>
             <div className="rec-section-title">书库外的新书</div>
             <div className="rec-section-sub">
-              AI 推荐，书库里已有的不会出现 · 公版经典可从 Project Gutenberg 免费下载{data.at > 0 && ` · 更新于 ${formatDate(data.at)}`}
+              AI 推荐 · Z-Library 书源 · 一键下载加入书库{data.at > 0 && ` · 更新于 ${formatDate(data.at)}`}
             </div>
           </div>
+          <button className="btn btn-sm" onClick={() => lib.openSettings('sources')}>{data.source?.configured ? '书源设置' : '连接 Z-Library'}</button>
         </div>
         {items.length === 0 ? (
           <div className="rec-empty">
@@ -139,7 +140,7 @@ export default function Discover() {
           </div>
         ) : (
           <div className={`rec-grid ${loading.ext ? 'dim' : ''}`}>
-            {items.map((it, i) => <RecCard key={it.id} item={it} index={i} onDismiss={() => dismiss(it.id)} />)}
+            {items.map((it, i) => <RecCard key={it.id} item={it} index={i} source={data.source} onDismiss={() => dismiss(it.id)} />)}
           </div>
         )}
       </div>
@@ -167,13 +168,14 @@ function LibCard({ book, reason, index, onDismiss }) {
   )
 }
 
-function RecCard({ item, index, onDismiss }) {
+function RecCard({ item, index, source, onDismiss }) {
   const lib = useLib()
   const [busy, setBusy] = useState(false)
   const [bookId, setBookId] = useState(item.bookId)
   const [imgOk, setImgOk] = useState(true)
   const inLib = bookId && lib.books.some(b => b.id === bookId)
   const q = `${item.title} ${item.author}`.trim()
+  const version = item.free?.source === 'Z-Library' ? item.free : null
 
   const download = async () => {
     setBusy(true)
@@ -197,7 +199,7 @@ function RecCard({ item, index, onDismiss }) {
       <div className="rec-info">
         <div className="rec-top">
           <div className="rec-title">{item.title}</div>
-          <button className="icon-btn rec-x" title="不感兴趣" onClick={onDismiss}><X size={15} /></button>
+          <button className="icon-btn rec-x" title="不感兴趣" disabled={busy} onClick={onDismiss}><X size={15} /></button>
         </div>
         <div className="rec-meta">
           {[item.author, item.year].filter(Boolean).join(' · ')}
@@ -208,15 +210,17 @@ function RecCard({ item, index, onDismiss }) {
           {item.tags.map(t => <span key={t} className="rec-tag">{t}</span>)}
         </div>
         <div className="rec-reason">{item.reason}</div>
+        {version && <div className="rec-meta">{[version.format?.toUpperCase(), version.lang, version.size].filter(Boolean).join(' · ')}</div>}
+        {source?.configured && item.sourceError && <div className="rec-meta" title={item.sourceError}>书源暂不可用，点击下载可重试</div>}
         <div className="rec-actions">
           {inLib ? (
             <button className="btn btn-sm btn-primary" onClick={() => lib.openBook(bookId)}><BookOpen size={14} />开始阅读</button>
-          ) : item.free ? (
+          ) : source?.configured ? (
             <button className="btn btn-sm btn-primary" disabled={busy} onClick={download}
-              title={`公版书，来自 ${item.free.source}${item.free.lang && item.free.lang !== 'zh' ? `（${item.free.lang.toUpperCase()} 原文）` : ''}`}>
-              {busy ? <span className="spinner" /> : <Download size={14} />}免费下载{item.free.lang && item.free.lang !== 'zh' ? '原文' : ''}
+              title={version ? `来自 Z-Library · ${version.format.toUpperCase()} · ${version.lang}` : '查找书名和作者匹配的 EPUB / PDF 版本并下载'}>
+              {busy ? <span className="spinner" /> : <Download size={14} />}{busy ? '下载入库中…' : version ? '一键下载' : '查找并下载'}
             </button>
-          ) : null}
+          ) : <button className="btn btn-sm btn-primary" onClick={() => lib.openSettings('sources')}>连接书源</button>}
           <button className="btn btn-sm" onClick={() => window.api.openExternal(search.douban(q))}><ExternalLink size={13} />豆瓣</button>
           <button className="btn btn-sm" onClick={() => window.api.openExternal(search.jd(q))}><ExternalLink size={13} />京东</button>
         </div>

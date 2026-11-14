@@ -43,6 +43,16 @@
 
 Key 只保存在本机的应用数据目录中。
 
+## Z-Library 在线书源
+
+“为你推荐”的在线书单由 AI 根据阅读兴趣生成，并在 Z-Library 匹配书名、作者相符的版本，优先中文和 EPUB，也支持 PDF。点“一键下载”（尚未匹配时为“查找并下载”），下载成功自动加入书库，按钮变为“开始阅读”。原有推荐无需重新生成即可查找下载。
+
+首次使用：打开“设置 → 在线书源”，填写自己确认可用的 Z-Library HTTPS 站点地址。在该站点登录后，通过浏览器开发者工具的 Application / 应用 → Cookies 复制 `remix_userid`、`remix_userkey`，点击“验证并保存”。会话以 Electron safeStorage 加密，单独保存在数据目录 `library/zlibrary-session.json`，不会发送给 AI，也不保存账号密码；更换电脑或系统账号后可能需要重新配置。不要分享会话值。
+
+使用非官方 EAPI，不内置或自动发现镜像。登录失效、网页验证、地址不可用、额度不足均会提示；没有匹配版本时不会下载近似的其他书籍。单文件最大 150 MB，下载后检查 EPUB / PDF 文件标识，拒绝把 HTML 登录页导入书库。仅下载你有权获取的版本。
+
+协议参考：[EAPI 研究文档](https://github.com/baroxyton/zlibrary-eapi-documentation)、[EAPI 客户端接入说明](https://github.com/heartleo/zlib/blob/main/docs/eapi.md)。接口可能随上游变化；本项目的自动测试使用模拟响应，真实账号下载需要配置后验证。
+
 ## 扫描版 PDF 自动识别文字（OCR）
 
 打开扫描版或复制出来是乱码的 PDF 时，后台自动识别文字，不用任何操作：先识别正在看的页，再从这里往后，最后整本书。识别好的页铺一层透明文字，和普通 PDF 一样可以选中、复制、高亮、做笔记、朗读（逐句高亮）、搜索，也能交给 AI 助手。

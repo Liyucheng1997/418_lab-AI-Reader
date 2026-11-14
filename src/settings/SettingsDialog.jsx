@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Settings, Sparkles, Info, X, Eye, EyeOff, Keyboard, AudioLines } from 'lucide-react'
+import { Settings, Sparkles, Info, X, Eye, EyeOff, Keyboard, AudioLines, LibraryBig } from 'lucide-react'
 import { useLib } from '../App.jsx'
 import { toast, promptDialog } from '../lib/ui.jsx'
 import { useUpdateState, updateText } from './update.jsx'
@@ -35,6 +35,7 @@ export default function SettingsDialog({ tab: initial, onClose }) {
             <div className="h">SETTINGS</div>
             <Nav id="general" icon={Settings}>通用</Nav>
             <Nav id="ai" icon={Sparkles}>AI 助手</Nav>
+            <Nav id="sources" icon={LibraryBig}>在线书源</Nav>
             <Nav id="tts" icon={AudioLines}>朗读</Nav>
             <Nav id="keys" icon={Keyboard}>快捷键</Nav>
             <Nav id="about" icon={Info}>关于</Nav>
@@ -43,6 +44,7 @@ export default function SettingsDialog({ tab: initial, onClose }) {
             <button className="modal-x settings-x" onClick={onClose}><X size={15} /></button>
             {tab === 'general' && <General />}
             {tab === 'ai' && <AI />}
+            {tab === 'sources' && <BookSources />}
             {tab === 'tts' && <TTS />}
             {tab === 'keys' && <Keys />}
             {tab === 'about' && <About />}
@@ -52,6 +54,57 @@ export default function SettingsDialog({ tab: initial, onClose }) {
     </div>,
     document.body,
   )
+}
+
+function BookSources() {
+  const lib = useLib()
+  const [cfg, setCfg] = useState({ baseUrl: '', userId: '', userKey: '' })
+  const [state, setState] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState('')
+  useEffect(() => {
+    window.api.zlibState().then(s => { setState(s); setCfg(c => ({ ...c, baseUrl: s.baseUrl, userId: s.userId })) })
+  }, [])
+  const run = async action => {
+    setBusy(true); setMessage('')
+    try { await action() } catch (e) {
+      setMessage(String(e.message || e).replace(/^Error invoking remote method '[^']+': (Error: )?/, ''))
+    } finally { setBusy(false) }
+  }
+  const field = (key, label, placeholder, type = 'text') => (
+    <div className="set-row"><label className="k" htmlFor={`zlib-${key}`}>{label}</label><div className="v">
+      <input id={`zlib-${key}`} className="input" type={type} value={cfg[key]} placeholder={placeholder}
+        autoComplete="off" spellCheck={false} disabled={busy} onChange={e => setCfg(c => ({ ...c, [key]: e.target.value }))} />
+    </div></div>
+  )
+  return <>
+    <div className="eyebrow">BOOK SOURCES</div><h2>在线书源</h2>
+    <div className="set-hint">在线推荐使用 Z-Library 查找 EPUB / PDF，点“一键下载”即可加入书库。推荐书单仍根据你的阅读兴趣生成。</div>
+    <div className="set-card">
+      {field('baseUrl', 'Z-Library 地址', '你已确认可用的 HTTPS 站点地址（不含路径）')}
+      {field('userId', 'remix_userid', '账号会话 ID')}
+      {field('userKey', 'remix_userkey', state?.configured ? '已加密保存；更新会话时重新填写' : '账号会话密钥', 'password')}
+      <div className="set-row"><span className="k">连接</span><div className="v">
+        <button className="btn btn-sm btn-primary" disabled={busy || !state || !cfg.baseUrl || !cfg.userId || !cfg.userKey}
+          onClick={() => run(async () => {
+            const s = await window.api.zlibSave(cfg)
+            setState(s); setCfg(c => ({ ...c, userKey: '' })); await lib.updateSettings({})
+            setMessage('连接成功，会话已加密保存'); toast('书源已连接', 'success')
+          })}>{busy ? '处理中…' : '验证并保存'}</button>
+        <button className="btn btn-sm" disabled={busy || !state?.configured} onClick={() => run(async () => {
+          const p = await window.api.zlibTest()
+          setMessage(`已连接${p.name ? `：${p.name}` : ''}${p.limit != null ? ` · 今日已下载 ${p.used ?? '?'} / ${p.limit}` : ''}`)
+        })}>测试已保存会话</button>
+        <button className="btn btn-sm" disabled={busy || !state?.configured} onClick={() => run(async () => {
+          setState(await window.api.zlibClear()); setCfg({ baseUrl: '', userId: '', userKey: '' })
+          await lib.updateSettings({}); setMessage('会话已移除')
+        })}>移除会话</button>
+      </div></div>
+    </div>
+    {message && <div className="set-hint" role="status">{message}</div>}
+    <div className="set-hint">在你使用的 Z-Library 网站登录后，打开浏览器开发者工具 → Application（应用）→ Cookies，复制 remix_userid 和 remix_userkey 的值。地址填写同一个站点；这些值只在本机加密保存，请勿分享。</div>
+    <div className="set-hint">非官方 EAPI 可能变化；遇到网页验证、登录失效或额度不足时会提示。下载仅支持 EPUB / PDF，单文件最大 150 MB。请仅下载你有权获取的版本。</div>
+  </>
 }
 
 function General() {

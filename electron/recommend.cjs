@@ -1,5 +1,4 @@
-// 为你推荐：根据阅读记录给书打分画像 → 交给设置里的 AI 推荐 → 联网补封面、查公版免费下载
-// 免费下载只接 Project Gutenberg（公版书），下载地址由这里查出来，界面不能传任意网址进来
+// 为你推荐：阅读画像 → AI 书单 → 补封面、匹配已配置的在线书源
 const { cleanTitle, similar } = require('./covers.cjs')
 
 const DAY = 864e5
@@ -60,9 +59,8 @@ const SYSTEM = `你是一位博览群书、眼光很好的图书编辑，根据�
 - 大约七成贴近他的口味（kind = "similar"），三成帮他拓展视野、但仍有内在联系（kind = "explore"）。
 - 不要推荐他已经读过或书库里已有的书，也不要推荐“不要推荐”列表里的书。
 - 中文书用中文书名；外国作品用通行的中文译名，并在 originalTitle / originalAuthor 里给出原文书名和作者原名。
-- publicDomain：作品已进入公版、可能在 Project Gutenberg 上免费下载（如作者去世超过 70 年的经典）时为 true，否则为 false。
 只输出一个 JSON 数组，不要任何其他文字。每一项：
-{"title":"","author":"","originalTitle":"","originalAuthor":"","year":"","tags":["",""],"reason":"不超过 70 字","kind":"similar","publicDomain":false}`
+{"title":"","author":"","originalTitle":"","originalAuthor":"","year":"","tags":["",""],"reason":"不超过 70 字","kind":"similar"}`
 
 function extractJSON(text) {
   const start = text.indexOf('['), end = text.lastIndexOf(']')
@@ -92,11 +90,10 @@ async function askAI(streamChat, cfg, profile, { wish, avoid, count }) {
       tags: Array.isArray(x.tags) ? x.tags.map(String).slice(0, 3) : [],
       reason: String(x.reason || '').trim(),
       kind: x.kind === 'explore' ? 'explore' : 'similar',
-      publicDomain: !!x.publicDomain,
     }))
 }
 
-// ---------- 联网补充：封面、Project Gutenberg ----------
+// ---------- 联网补充：封面、在线书源 ----------
 async function getJSON(fetch, url) {
   const res = await fetch(url, { headers: { 'User-Agent': 'AI-Reader (book recommendations)' } })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -125,33 +122,14 @@ async function findCoverURL(fetch, item, googleKey) {
   return ''
 }
 
-// 在 Project Gutenberg（经 Gutendex 检索）里找同一部作品的 EPUB
-async function findGutenberg(fetch, item) {
-  const title = item.originalTitle || item.title
-  const author = item.originalAuthor || item.author
-  const surname = author.split(/[\s,，·.]+/).filter(Boolean).pop() || ''
-  const data = await getJSON(fetch, `https://gutendex.com/books/?search=${encodeURIComponent(`${title} ${surname}`.trim())}`)
-  for (const r of data.results || []) {
-    const t = String(r.title || '').split(/[:;]/)[0]
-    if (similar(title, t) < 0.7) continue
-    const names = (r.authors || []).map(a => a.name).join(' ')
-    // 有原文作者名时核对作者，避免同名不同书
-    if (/^[a-z]/i.test(surname) && !names.toLowerCase().includes(surname.toLowerCase())) continue
-    const url = r.formats?.['application/epub+zip']
-    if (!url) continue
-    return { source: 'Project Gutenberg', url: url.replace(/^http:/, 'https:'), page: `https://www.gutenberg.org/ebooks/${r.id}`, lang: (r.languages || [])[0] || '' }
-  }
-  return null
-}
-
-async function enrich(fetch, items, googleKey) {
+async function enrich(fetch, items, googleKey, findSource = null) {
   let i = 0
   const worker = async () => {
     while (i < items.length) {
       const it = items[i++]
       const [cover, free] = await Promise.all([
         findCoverURL(fetch, it, googleKey).catch(() => ''),
-        it.publicDomain ? findGutenberg(fetch, it).catch(() => null) : null,
+        findSource ? findSource(it).catch(err => { it.sourceError = err.message; return null }) : null,
       ])
       it.cover = cover
       it.free = free
@@ -325,6 +303,4 @@ async function askLibraryAI(streamChat, cfg, profile, pool, { wish, count }) {
     .map(x => ({ bookId: x.c.id, reason: x.reason, kind: 'ai' }))
 }
 
-const GUTENBERG_HOST = /^https:\/\/(www\.)?gutenberg\.org\//i
-
-module.exports = { buildProfile, askAI, enrich, inLibrary, libraryPicks, askLibraryAI, GUTENBERG_HOST }
+module.exports = { buildProfile, askAI, enrich, inLibrary, libraryPicks, askLibraryAI }

@@ -75,6 +75,10 @@ contextBridge.exposeInMainWorld('api', {
   },
 
   recGet: () => invoke('rec:get'),
+  zlibState: () => invoke('zlib:state'),
+  zlibSave: cfg => invoke('zlib:save', cfg),
+  zlibClear: () => invoke('zlib:clear'),
+  zlibTest: () => invoke('zlib:test'),
   recRefresh: wish => invoke('rec:refresh', wish),
   recDismiss: id => invoke('rec:dismiss', id),
   recDownload: id => invoke('rec:download', id),

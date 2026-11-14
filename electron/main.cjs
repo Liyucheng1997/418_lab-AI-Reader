@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, protocol, net, shell, globalShortcut, nativeTheme } = require('electron')
+const { app, BrowserWindow, ipcMain, dialog, protocol, net, shell, globalShortcut, nativeTheme, safeStorage } = require('electron')
 const path = require('path')
 const fs = require('fs')
 const crypto = require('crypto')
@@ -11,6 +11,7 @@ const { OcrManager } = require('./ocr.cjs')
 const linked = require('./linked.cjs')
 const covers = require('./covers.cjs')
 const rec = require('./recommend.cjs')
+const { ZLibrary, SessionStore } = require('./zlibrary.cjs')
 
 const SUPPORTED = ['epub', 'pdf', 'txt', 'mobi', 'azw3', 'azw', 'fb2', 'fbz', 'cbz']
 const DEV_URL = process.env.VITE_DEV_URL
@@ -441,6 +442,20 @@ function setupIpc() {
   h('ai:abort', reqId => aiJobs.get(reqId)?.abort())
 
   // ---------- 为你推荐 ----------
+  const zSession = new SessionStore(store.dir, safeStorage)
+  const zClient = () => {
+    const cfg = zSession.read()
+    if (!cfg) throw new Error('请先在设置 → 在线书源配置 Z-Library 会话')
+    return new ZLibrary(webFetch, cfg)
+  }
+  h('zlib:state', () => zSession.state())
+  h('zlib:save', async cfg => {
+    // Confirm the account before replacing the saved session.
+    await new ZLibrary(webFetch, cfg).profile()
+    return zSession.save(cfg)
+  })
+  h('zlib:clear', () => zSession.clear())
+  h('zlib:test', () => zClient().profile())
   // store.data.recs = { at, wish, items, dismissed: [书名], shown: [书名] }
   // store.data.recs.lib = { at, wish, items: [{ bookId, reason }] }：AI 从书库里精选的结果；libDismissed：书库推荐里点了“不感兴趣”的书
   const recState = () => {
@@ -453,7 +468,7 @@ function setupIpc() {
     { dismissed: recState().libDismissed, poolSize })
   const recSnapshot = () => {
     const { pool: _p, profile, ...local } = libPicks(0)
-    return { ...recState(), profile, local }
+    return { ...recState(), profile, local, source: zSession.state() }
   }
   h('rec:get', () => recSnapshot())
   h('rec:lib-ai', async wish => {
@@ -483,7 +498,8 @@ function setupIpc() {
       const avoid = [...new Set([...st.dismissed, ...st.shown])].slice(-80)
       let items = await rec.askAI(streamChat, store.data.settings.ai, profile, { wish: (wish || '').trim(), avoid, count: 14 })
       items = items.filter(it => !rec.inLibrary(it, store.data.books)).slice(0, 12)
-      await rec.enrich(webFetch, items, store.data.settings.googleBooksKey)
+      const client = zSession.state().configured ? zClient() : null
+      await rec.enrich(webFetch, items, store.data.settings.googleBooksKey, client ? it => client.find(it) : null)
       items.forEach(it => { it.id = crypto.randomUUID() })
       Object.assign(st, {
         at: now(), wish: (wish || '').trim(), items,
@@ -502,23 +518,47 @@ function setupIpc() {
     store.save()
     return st.items
   })
-  // 只下载这里自己查出来的 Project Gutenberg 地址
-  h('rec:download', async id => {
+  // Only resolve server-held recommendation IDs; renderer cannot submit download URLs.
+  const recDownloads = new Map()
+  const downloadRec = async id => {
     const it = recState().items.find(x => x.id === id)
-    if (!it?.free || !rec.GUTENBERG_HOST.test(it.free.url)) throw new Error('这本书没有可用的免费版本')
-    const res = await webFetch(it.free.url, { headers: { 'User-Agent': 'AI-Reader' } })
-    if (!res.ok) throw new Error(`下载失败（HTTP ${res.status}）`)
-    const buf = Buffer.from(await res.arrayBuffer())
-    if (buf.length < 1024 || buf.subarray(0, 2).toString() !== 'PK') throw new Error('下载到的不是 EPUB 文件')
-    const name = `${(it.originalTitle || it.title).replace(/[\\/:*?"<>|]+/g, ' ').trim().slice(0, 80)}.epub`
+    if (!it) throw new Error('这条推荐已更新，请刷新后重试')
+    const existing = store.data.books.find(b => b.id === it.bookId || (it.free?.source === 'Z-Library' && b.sourceRef === `zlibrary:${it.free.id}:${it.free.hash}`))
+    if (existing) return { ...summarize([{ book: existing, duplicate: true }]), bookId: existing.id }
+    const client = zClient()
+    // Search again on click: metadata is cached, expiring file links never are.
+    const version = await client.find(it)
+    if (!version) throw new Error('Z-Library 暂未找到书名和作者匹配的 EPUB / PDF 版本')
+    const duplicate = store.data.books.find(b => b.sourceRef === `zlibrary:${version.id}:${version.hash}`)
+    if (duplicate) { it.bookId = duplicate.id; return { ...summarize([{ book: duplicate, duplicate: true }]), bookId: duplicate.id } }
+    let buf
+    try { buf = await client.download(version) } catch (err) {
+      if (err.name === 'TimeoutError' || err.name === 'AbortError') throw new Error('下载超时，请稍后重试')
+      throw err
+    }
+    const baseName = String(version.title || it.title).replace(/[\x00-\x1f\\/:*?"<>|]+/g, ' ').trim().slice(0, 80) || 'book'
+    const name = `${baseName}.${version.format}`
     const tmpDir = fs.mkdtempSync(path.join(app.getPath('temp'), 'aireader-'))
     const file = path.join(tmpDir, name)
     try {
       fs.writeFileSync(file, buf)
       const r = importFile(file, null)
+      if (!r.duplicate) {
+        r.book.title = version.title || it.title
+        r.book.author = version.author || it.author
+        r.book.sourceRef = `zlibrary:${version.id}:${version.hash}`
+      }
       it.bookId = r.book.id
+      it.free = version
+      delete it.sourceError
       return { ...summarize([r]), bookId: r.book.id }
     } finally { fs.rmSync(tmpDir, { recursive: true, force: true }) }
+  }
+  h('rec:download', async id => {
+    if (recDownloads.has(id)) return recDownloads.get(id)
+    const job = downloadRec(id).finally(() => recDownloads.delete(id))
+    recDownloads.set(id, job)
+    return job
   })
 
   // PDF 文字识别：indices 为要识别的页（0 起），front 表示当前页、插队优先
