@@ -8,4 +8,4 @@
 
 限制：没有用户账号，不能声称已通过真实账号下载验证。
 
-4. 用户已授权：打包 Windows 安装程序、提交推送并发布 GitHub Release。Status: in_progress
+4. 用户已授权：打包 Windows 安装程序、提交推送并发布 GitHub Release。Status: complete
