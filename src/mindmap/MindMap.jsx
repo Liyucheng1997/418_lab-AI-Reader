@@ -1,19 +1,20 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   X, Network, Users, Download, RotateCcw, Search, Maximize2, Plus, Minus, Square, Sparkles, KeyRound,
-  BookOpen, ChevronsDownUp, ChevronsUpDown, FileText, Image as ImageIcon, Star, Play, Pause, FastForward, Crosshair,
+  BookOpen, ChevronsDownUp, ChevronsUpDown, FileText, Image as ImageIcon, Star, Play, Pause, FastForward, Crosshair, Check, RefreshCw,
 } from 'lucide-react'
 import { useLib } from '../App.jsx'
 import { toast, openMenu, confirmDialog } from '../lib/ui.jsx'
 import { aiReady, aiLabel } from '../lib/ai.js'
 import { isAppDark } from '../reader/theme.js'
 import {
-  DETAIL, SPEEDS, getSpeed, bookText, generate, cancel, subscribe, jobState, isActive, setPaused, setSpeed, skipAhead,
+  DETAIL, SPEEDS, getSpeed, bookText, generate, analyzeBook, cancel, subscribe, jobState, isActive, setPaused, setSpeed, skipAhead,
 } from './generate.js'
 import {
   buildTree, layoutTree, linkPath, findPath, layoutGraph, graphBBox, toMarkdown, palette,
   BRANCH_COLORS, GROUP_COLORS, STYLE,
 } from './layout.js'
+import { LENSES, fallbackDirections, focusOf } from './focus.js'
 
 const hexA = (hex, a) => {
   const n = parseInt(hex.slice(1), 16)
@@ -123,6 +124,7 @@ export default function MindMap({ record, onClose, onLocate, onOpenBook }) {
   const [sel, setSel] = useState(null) // { kind, name, index }
   const [query, setQuery] = useState('')
   const [detail, setDetail] = useState('normal')
+  const [picking, setPicking] = useState(false) // 重新选侧重点
 
   useEffect(() => {
     let alive = true
@@ -148,10 +150,16 @@ export default function MindMap({ record, onClose, onLocate, onOpenBook }) {
   const active = isActive(job) // 正在边读边画
   const map = active ? job.liveMap : doc?.map
   const ranges = active ? job.chunks?.map(c => c.range) : doc?.ranges
-  const start = (fresh = false) => { setSel(null); generate(record, { detail, fresh, model: aiLabel(ai) }) }
-  const restart = async () => {
-    if (!(await confirmDialog({ title: '重新生成思维导图？', message: '会让 AI 从头再读一遍全书，现有的导图会被替换。', okText: '重新生成' }))) return
-    start(true)
+  // focus 不给：沿用上次选的侧重点接着读
+  const start = ({ focus, fresh = false } = {}) => {
+    setSel(null)
+    setPicking(false)
+    setView('map')
+    generate(record, { detail, fresh, focus, model: aiLabel(ai) })
+  }
+  const startPicked = async focus => {
+    if (doc?.map && !(await confirmDialog({ title: '按新的侧重点重新生成？', message: '会让 AI 从头再读一遍全书，现有的导图会被替换。', okText: '开始' }))) return
+    start({ focus, fresh: !!doc?.map })
   }
 
   const exportAs = async kind => {
@@ -202,7 +210,7 @@ export default function MindMap({ record, onClose, onLocate, onOpenBook }) {
     return null
   }, [index])
 
-  const showIntro = !active && doc !== undefined && !doc?.map
+  const showIntro = !active && doc !== undefined && (!doc?.map || picking)
   return (
     <div className="mindmap">
       <header className="mm-top drag">
@@ -211,14 +219,14 @@ export default function MindMap({ record, onClose, onLocate, onOpenBook }) {
           <span className="t">《{record.title}》</span>
           <span className="c">{active ? '边读边画' : map ? (view === 'map' ? '思维导图' : '人物关系') : '思维导图'}</span>
         </div>
-        {map && (
+        {map && !showIntro && (
           <div className="seg">
             <button className={view === 'map' ? 'active' : ''} onClick={() => setView('map')}><Network size={14} />思维导图</button>
             <button className={view === 'graph' ? 'active' : ''} onClick={() => setView('graph')} disabled={!map.characters?.length}><Users size={14} />人物关系</button>
           </div>
         )}
         <span style={{ flex: 1 }} />
-        {map && (
+        {map && !showIntro && (
           <label className="mm-search">
             <Search size={14} />
             <input value={query} placeholder="查找人物、概念…" onChange={e => setQuery(e.target.value)}
@@ -227,12 +235,12 @@ export default function MindMap({ record, onClose, onLocate, onOpenBook }) {
           </label>
         )}
         {onOpenBook && <button className="btn btn-sm" onClick={onOpenBook}><BookOpen size={14} />打开阅读</button>}
-        {map && !active && <button className="btn btn-sm" onClick={exportMenu}><Download size={14} />导出</button>}
-        {map && !active && <button className="icon-btn" title="重新生成" onClick={restart}><RotateCcw size={16} /></button>}
+        {map && !active && !picking && <button className="btn btn-sm" onClick={exportMenu}><Download size={14} />导出</button>}
+        {map && !active && !picking && <button className="btn btn-sm" title="换个侧重点重新整理这本书" onClick={() => setPicking(true)}><RotateCcw size={14} />换个侧重点</button>}
       </header>
 
-      {!active && map && job?.phase === 'error' && <div className="mm-banner err">生成中断：{job.error}<button className="btn btn-sm btn-primary" onClick={() => start()}>继续生成</button></div>}
-      {!active && map && (doc?.status === 'partial' || job?.message) && job?.phase !== 'error' && (
+      {!active && !showIntro && map && job?.phase === 'error' && <div className="mm-banner err">生成中断：{job.error}<button className="btn btn-sm btn-primary" onClick={() => start()}>接着读</button></div>}
+      {!active && !showIntro && map && (doc?.status === 'partial' || job?.message) && job?.phase !== 'error' && (
         <div className="mm-banner">
           {job?.message || `上次读到第 ${Object.keys(doc.chunks || {}).length}/${doc.chunkCount} 段就停下了。`}
           {doc?.status === 'partial' && <button className="btn btn-sm btn-primary" onClick={() => start()}><Play size={13} />接着读</button>}
@@ -241,10 +249,11 @@ export default function MindMap({ record, onClose, onLocate, onOpenBook }) {
 
       <div className="mm-body">
         {doc === undefined && !active && <div className="mm-center"><span className="spinner" /></div>}
-        {showIntro && <Intro record={record} ai={ai} detail={detail} setDetail={setDetail} onStart={() => start()} job={job} resume={doc} />}
+        {showIntro && <Intro record={record} ai={ai} detail={detail} setDetail={setDetail} onStart={startPicked} onResume={() => start()} job={job} doc={doc}
+          onCancel={doc?.map ? () => setPicking(false) : null} />}
         {active && <ReadingPane job={job} bookId={record.id} />}
         {active && !map && <div className="mm-canvas mm-empty" style={{ background: C.bg }}><span className="spinner" /></div>}
-        {map && (
+        {map && !showIntro && (
           <>
             {view === 'map'
               ? <TreeView map={map} title={record.title} C={C} sel={sel} setSel={setSel} query={query} live={active} />
@@ -257,56 +266,145 @@ export default function MindMap({ record, onClose, onLocate, onOpenBook }) {
   )
 }
 
-// ---------- 开始前 ----------
-function Intro({ record, ai, detail, setDetail, onStart, job, resume }) {
+// ---------- 开始前：先分析这本书，提出几个方向，读者勾选侧重点（可多选、可自己加） ----------
+const analysisJobs = new Map() // 同一本书的分析只跑一次（关掉再打开不重复调用）
+
+function Intro({ record, ai, detail, setDetail, onStart, onResume, onCancel, job, doc }) {
   const lib = useLib()
   const [size, setSize] = useState(null)
   const [speed, setSp] = useState(() => jobState(record.id)?.speed)
+  const [analysis, setAnalysis] = useState(doc?.analysis || null)
+  const [failed, setFailed] = useState(null)
+  const [mine, setMine] = useState(() => (doc?.focus || []).filter(f => f.kind === 'custom' && f.id.startsWith('u'))) // 读者自己加的
+  const [picked, setPicked] = useState(null) // Set(id)
+  const [draft, setDraft] = useState('')
   useEffect(() => {
     let alive = true
     bookText(record).then(t => alive && setSize(t.total)).catch(() => alive && setSize(-1))
     return () => { alive = false }
   }, [record.id])
+
+  const analyze = useCallback(async (again = false) => {
+    setFailed(null)
+    if (again) { setAnalysis(null); analysisJobs.delete(record.id) }
+    if (!analysisJobs.has(record.id)) analysisJobs.set(record.id, analyzeBook(record))
+    try {
+      const a = await analysisJobs.get(record.id)
+      setAnalysis(a)
+      const cur = await window.api.getMindMap(record.id)
+      window.api.setMindMap(record.id, { ...(cur || { version: 0, bookId: record.id }), analysis: a })
+    } catch (e) {
+      analysisJobs.delete(record.id)
+      setFailed(e?.message || String(e))
+      setAnalysis({ genre: '', summary: '', directions: fallbackDirections(), failed: true })
+    }
+  }, [record.id])
+  useEffect(() => { if (!analysis && aiReady(ai)) analyze() }, [aiReady(ai)])
+
+  const directions = useMemo(() => [...(analysis?.directions || []), ...mine], [analysis, mine])
+  // 默认勾上：上次选过的，否则 AI 推荐的
+  useEffect(() => {
+    if (!analysis || picked) return
+    const prev = (doc?.focus || []).map(f => f.id).filter(id => directions.some(d => d.id === id))
+    setPicked(new Set(prev.length ? prev : directions.filter(d => d.recommended).map(d => d.id)))
+  }, [analysis])
+  const toggle = id => setPicked(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
+  const addMine = () => {
+    const t = draft.trim()
+    if (!t) return
+    const id = 'u' + (Math.max(0, ...mine.map(m => +m.id.slice(1) || 0)) + 1)
+    setMine(m => [...m, { id, kind: 'custom', title: t.length > 14 ? t.slice(0, 14) + '…' : t, instruction: t, desc: '你自己加的方向', mine: true }])
+    setPicked(s => new Set([...(s || []), id]))
+    setDraft('')
+  }
+  const focus = directions.filter(d => picked?.has(d.id))
   const chunks = size > 0 ? Math.max(1, Math.ceil(Math.max(0, size - 8000) / DETAIL[detail].chunk) + 1) : 0
-  const resumable = resume?.version === 2 && resume.chunkCount && Object.keys(resume.chunks || {}).length // 旧版本的分段不同，只能从头读
-  return (
+  const resumable = !onCancel && doc?.version === 3 && doc.chunkCount && Object.keys(doc.chunks || {}).length // 旧版本的分段不同，只能从头读
+
+  if (!aiReady(ai)) return (
     <div className="mm-center">
       <div className="mm-intro">
         <div className="mm-intro-icon"><Network size={26} strokeWidth={1.8} /></div>
         <div className="mm-intro-title">边读边画思维导图</div>
-        <div className="mm-intro-msg">AI 像人一样从头读这本书：左边是正在读的原文，读到哪个人物、概念第一次出场，右边的导图就长出那个节点。读完后再整理成完整的思维导图和人物关系图。</div>
-        <div className="mm-feats">
-          <div><Users size={16} /><b>人物</b><span>身份、性格、经历，按阵营分组</span></div>
-          <div><Network size={16} /><b>关系</b><span>谁和谁是什么关系，一张图看清</span></div>
-          <div><Sparkles size={16} /><b>概念</b><span>术语、思想、组织、器物</span></div>
-          <div><Play size={16} /><b>脉络</b><span>主题、情节或论证结构、地点</span></div>
-        </div>
-        {!aiReady(ai) ? (
-          <>
-            <div className="mm-intro-note"><KeyRound size={14} />需要先配置 AI（Claude 订阅或任一服务的 API Key）</div>
-            <button className="btn btn-primary" onClick={() => lib.openSettings('ai')}>打开 AI 设置</button>
-          </>
+        <div className="mm-intro-msg">AI 先翻一翻这本书，按书的类型提出几种整理方向（人物关系、概念、情节、章节框架、方法……），你挑想要的，再像人一样从头读、边读边画。</div>
+        <div className="mm-intro-note"><KeyRound size={14} />需要先配置 AI（Claude 订阅或任一服务的 API Key）</div>
+        <button className="btn btn-primary" onClick={() => lib.openSettings('ai')}>打开 AI 设置</button>
+      </div>
+    </div>
+  )
+
+  return (
+    <div className="mm-center">
+      <div className="mm-intro wide">
+        <div className="mm-intro-title">这本书想怎么整理？</div>
+        {!analysis ? (
+          <div className="mm-analyzing">
+            <span className="spinner" />
+            <div>
+              <b>AI 正在翻看这本书</b>
+              <span>看目录和开头、中间、后面几段原文，判断这是什么类型的书、适合怎么整理…</span>
+            </div>
+          </div>
         ) : (
           <>
-            <div className="mm-detail-row">
-              <span className="form-label">精细程度</span>
-              <div className="seg">
-                {Object.entries(DETAIL).map(([k, d]) => <button key={k} className={detail === k ? 'active' : ''} title={d.hint} onClick={() => setDetail(k)}>{d.label}</button>)}
-              </div>
+            {analysis.summary || analysis.genre ? (
+              <div className="mm-intro-msg">{analysis.genre && <span className="mm-genre">{analysis.genre}</span>}{analysis.summary}</div>
+            ) : failed ? (
+              <div className="mm-intro-err">AI 分析没成功（{failed}），先给出通用的方向。<button className="btn btn-sm" onClick={() => analyze(true)}>再试一次</button></div>
+            ) : null}
+            <div className="mm-sub-t">
+              按这本书的特点，AI 建议这些方向，可以多选：
+              {!failed && <button className="mm-link-btn" title="让 AI 重新分析" onClick={() => analyze(true)}><RefreshCw size={12} />重新分析</button>}
             </div>
-            <SpeedPicker value={speed} onChange={v => { setSpeed(v); setSp(v) }} />
-            <div className="mm-intro-note tabular">
-              {size == null ? '正在统计全书字数…'
-                : size < 0 ? '读取全书文字失败'
-                : `全书约 ${wan(size)} 字，分 ${chunks} 段交给 AI（${aiLabel(ai)}）阅读，最后再整合一次`}
+            <div className="mm-dirs">
+              {directions.map(d => {
+                const on = !!picked?.has(d.id)
+                return (
+                  <button key={d.id} className={`mm-dir ${on ? 'on' : ''}`} onClick={() => toggle(d.id)}>
+                    <span className="mm-dir-check">{on && <Check size={13} strokeWidth={3} />}</span>
+                    <span className="mm-dir-body">
+                      <span className="mm-dir-title">{d.title}{d.recommended && <i className="mm-rec">推荐</i>}</span>
+                      <span className="mm-dir-desc">{d.desc}</span>
+                      <span className="mm-dir-kind">{d.kind === 'custom' ? d.mine ? '自定义' : '按本书特点' : LENSES[d.kind]?.label}</span>
+                    </span>
+                  </button>
+                )
+              })}
             </div>
-            {job?.phase === 'error' && <div className="mm-intro-err">{job.error}</div>}
-            <button className="btn btn-primary mm-go" onClick={onStart} disabled={size != null && size <= 0}>
-              <Play size={15} fill="currentColor" />{resumable ? `接着读（已读 ${resumable}/${resume.chunkCount} 段）` : '开始阅读'}
-            </button>
-            <div className="mm-intro-tip">读的过程中可以随时调速、暂停；关掉窗口后台会按最快速度继续。</div>
+            <div className="mm-add">
+              <input className="input" value={draft} placeholder="还想重点看什么？例如：书里提到的所有药方 / 作者对教育的看法" onChange={e => setDraft(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) addMine() }} />
+              <button className="btn" onClick={addMine} disabled={!draft.trim()}><Plus size={14} />添加</button>
+            </div>
           </>
         )}
+        <div className="mm-opts">
+          <div className="mm-detail-row">
+            <span className="form-label">精细程度</span>
+            <div className="seg">
+              {Object.entries(DETAIL).map(([k, d]) => <button key={k} className={detail === k ? 'active' : ''} title={d.hint} onClick={() => setDetail(k)}>{d.label}</button>)}
+            </div>
+          </div>
+          <SpeedPicker value={speed} onChange={v => { setSpeed(v); setSp(v) }} />
+        </div>
+        <div className="mm-intro-note tabular">
+          {size == null ? '正在统计全书字数…'
+            : size < 0 ? '读取全书文字失败'
+            : `全书约 ${wan(size)} 字，分 ${chunks} 段交给 AI（${aiLabel(ai)}）阅读，最后再整合一次`}
+        </div>
+        {job?.phase === 'error' && <div className="mm-intro-err">{job.error}</div>}
+        <div className="mm-go-row">
+          {onCancel && <button className="btn mm-go" onClick={onCancel}>取消</button>}
+          {resumable ? <>
+            <button className="btn mm-go" onClick={() => onStart(focus)} disabled={!analysis || !focus.length}>按所选方向从头读</button>
+            <button className="btn btn-primary mm-go" onClick={onResume}><Play size={15} fill="currentColor" />接着读（已读 {resumable}/{doc.chunkCount} 段）</button>
+          </> : (
+            <button className="btn btn-primary mm-go" onClick={() => onStart(focus)} disabled={!analysis || !focus.length || (size != null && size <= 0)}>
+              <Play size={15} fill="currentColor" />{focus.length ? `按这 ${focus.length} 个方向开始阅读` : '至少选一个方向'}
+            </button>
+          )}
+        </div>
+        <div className="mm-intro-tip">读的过程中可以随时调速、暂停；关掉窗口后台会按最快速度继续。</div>
       </div>
     </div>
   )
@@ -424,7 +522,7 @@ function ReadingPane({ job, bookId }) {
         {!feed.length && <div className="muted rd-feed-empty">读到的人物、概念、情节会出现在这里</div>}
         {feed.slice(-6).reverse().map(f => (
           <div key={f.p + f.kind + f.name} className="rd-item">
-            <span className={`rd-kind k-${f.kind}`}>{f.kind}</span>
+            <span className={`rd-kind k-${f.k?.startsWith('x_') ? 'custom' : f.k}`}>{f.kind}</span>
             <b>{f.name}</b>
             {f.desc && <span className="rd-desc">{f.desc}</span>}
           </div>
@@ -435,7 +533,7 @@ function ReadingPane({ job, bookId }) {
 }
 
 // ---------- 思维导图 ----------
-const sameRef = (a, b) => !!a && !!b && a.kind === b.kind && (a.kind === 'event' ? a.index === b.index : a.name === b.name)
+const sameRef = (a, b) => !!a && !!b && a.kind === b.kind && a.name === b.name && a.index === b.index && a.id === b.id
 
 const TreeView = memo(function TreeView({ map, title, C, sel, setSel, query, live }) {
   const pz = usePanZoom()
@@ -550,7 +648,7 @@ const TreeView = memo(function TreeView({ map, title, C, sel, setSel, query, liv
           {lay.nodes.map(n => {
             const st = STYLE[Math.min(n.level, 3)]
             const col = colorOf(n)
-            const selected = sameRef(n.ref, sel) && n.ref.kind !== 'branch'
+            const selected = sameRef(n.ref, sel) && n.ref.kind !== 'branch' && n.ref.point == null
             const match = isMatch(n)
             let fill, stroke, fg, sub
             if (n.level === 0) { fill = dark(C) ? '#f5f5f7' : '#1d1d1f'; fg = dark(C) ? '#1d1d1f' : '#ffffff'; sub = dark(C) ? '#6e6e73' : '#a1a1a6' }
@@ -563,7 +661,7 @@ const TreeView = memo(function TreeView({ map, title, C, sel, setSel, query, liv
             const hasKids = n.children.length > 0
             return (
               <g key={n.key} data-node className="mm-node" transform={`translate(${n.cx},${n.cy})`} style={{ transform: `translate(${n.cx}px, ${n.cy}px)` }}
-                onClick={() => n.ref && setSel(n.ref.kind === 'branch' ? null : n.ref)} onDoubleClick={() => hasKids && n.level > 0 && toggle(n)}>
+                onClick={() => n.ref && setSel(n.ref.kind === 'branch' ? null : n.ref.point != null ? { kind: n.ref.kind, index: n.ref.index } : n.ref)} onDoubleClick={() => hasKids && n.level > 0 && toggle(n)}>
                 <g className={fresh.has(n.key) ? 'mm-pop' : undefined}>
                   {(selected || match) && <rect x={x - 4} y={y - 4} width={n.w + 8} height={n.h + 8} rx={n.h / 2 + 4 > 16 ? 16 : n.h / 2 + 4} fill="none" stroke={selected ? col : C.match} strokeWidth={2.5} />}
                   <rect x={x} y={y} width={n.w} height={n.h} rx={n.level <= 1 ? Math.min(n.h / 2, 20) : 9} fill={fill} stroke={stroke} strokeWidth={stroke ? 1 : 0} />
@@ -777,17 +875,29 @@ function Detail({ map, doc, ranges: allRanges, sel, setSel, resolve, index, onLo
 
   let body
   if (!sel || sel.kind === 'book') {
-    const n = { c: map.characters?.length || 0, r: map.relations?.length || 0, k: (map.conceptCategories || []).reduce((s, c) => s + c.items.length, 0), e: map.timeline?.length || 0 }
+    const focus = focusOf(map)
+    const count = {
+      characters: [map.characters?.length, '人物'], concepts: [(map.conceptCategories || []).reduce((s, c) => s + c.items.length, 0), '概念'],
+      plot: [map.timeline?.length, '情节'], outline: [map.outline?.length, '章节'], themes: [map.themes?.length, '主题'],
+      methods: [map.methods?.length, '方法'], quotes: [map.quotes?.length, '金句'], places: [map.places?.length, '地点'],
+    }
+    const stats = []
+    for (const f of focus) {
+      if (f.kind === 'custom') stats.push([(map.custom?.[f.id] || []).reduce((s, g) => s + g.items.length, 0), f.title.length > 4 ? f.title.slice(0, 4) : f.title])
+      else if (count[f.kind]) stats.push(count[f.kind])
+      if (f.kind === 'characters') stats.push([map.relations?.length, '关系'])
+    }
     body = (
       <>
         <div className="mm-d-kind">全书概览{map.genre ? ` · ${map.genre}` : ''}</div>
         <div className="mm-d-name">《{record.title}》</div>
         {record.author && <div className="mm-d-alias">{record.author}</div>}
         <div className="mm-stats tabular">
-          <div><b>{n.c}</b>人物</div><div><b>{n.r}</b>关系</div><div><b>{n.k}</b>概念</div><div><b>{n.e}</b>情节</div>
+          {stats.slice(0, 4).map(([v, l]) => <div key={l}><b>{v || 0}</b>{l}</div>)}
         </div>
         {map.summary ? <p className="mm-d-desc">{map.summary}</p> : <p className="mm-d-desc muted">全书概述会在 AI 读完整本书、整合之后出现。</p>}
         {map.themes?.length > 0 && <Section title="主题">{map.themes.map(t => <div key={t.name} className="mm-d-item"><button className="mm-link" onClick={() => setSel({ kind: 'theme', name: t.name })}>{t.name}</button><span>{t.desc}</span></div>)}</Section>}
+        <Section title="侧重点"><div className="mm-tags">{focus.map(f => <span key={f.id} className="mm-tag">{f.title}</span>)}</div></Section>
         {map.characters?.some(c => c.role === '主角') && <Section title="主角"><div className="mm-tags">{map.characters.filter(c => c.role === '主角').map(c => <Link key={c.name} name={c.name} />)}</div></Section>}
         <div className="mm-d-foot muted">{doc?.model ? `由 ${doc.model} 生成` : ''}{doc?.updatedAt ? ` · ${new Date(doc.updatedAt).toLocaleString()}` : ''}</div>
       </>
@@ -873,6 +983,72 @@ function Detail({ map, doc, ranges: allRanges, sel, setSel, resolve, index, onLo
         {e.chapter && locate(e.chapter)}
       </>
     )
+  }
+  else if (sel.kind === 'chapter') {
+    const o = map.outline?.[sel.index]
+    if (o) body = (
+      <>
+        <div className="mm-d-kind">章节框架 · 第 {sel.index + 1} / {map.outline.length} 章</div>
+        <div className="mm-d-name">{o.chapter}</div>
+        <Section title={`要点（${o.points.length}）`}><ol className="mm-ol">{o.points.map((p, i) => <li key={i}>{p}</li>)}</ol></Section>
+        <div className="mm-step">
+          <button className="btn btn-sm" disabled={!sel.index} onClick={() => setSel({ kind: 'chapter', index: sel.index - 1 })}>上一章</button>
+          <button className="btn btn-sm" disabled={sel.index >= map.outline.length - 1} onClick={() => setSel({ kind: 'chapter', index: sel.index + 1 })}>下一章</button>
+        </div>
+        {locate(o.chapter)}
+      </>
+    )
+  } else if (sel.kind === 'method') {
+    const m = map.methods?.find(m => m.name === sel.name)
+    if (m) body = (
+      <>
+        <div className="mm-d-kind">方法</div>
+        <div className="mm-d-name">{m.name}</div>
+        {m.desc && <p className="mm-d-desc">{m.desc}</p>}
+        {m.steps?.length > 0 && <Section title="怎么做"><ol className="mm-ol">{m.steps.map((p, i) => <li key={i}>{p}</li>)}</ol></Section>}
+        {locate(m.name)}
+      </>
+    )
+  } else if (sel.kind === 'quote') {
+    const q = map.quotes?.[sel.index]
+    if (q) body = (
+      <>
+        <div className="mm-d-kind">金句 · 第 {sel.index + 1} / {map.quotes.length} 句</div>
+        <blockquote className="mm-quote">{q.text}</blockquote>
+        {q.note && <p className="mm-d-desc">{q.note}</p>}
+        {q.range && <div className="mm-d-alias">出自：{q.range}</div>}
+        <div className="mm-step">
+          <button className="btn btn-sm" disabled={!sel.index} onClick={() => setSel({ kind: 'quote', index: sel.index - 1 })}>上一句</button>
+          <button className="btn btn-sm" disabled={sel.index >= map.quotes.length - 1} onClick={() => setSel({ kind: 'quote', index: sel.index + 1 })}>下一句</button>
+          <button className="btn btn-sm" onClick={() => { navigator.clipboard.writeText(q.text); toast('已复制') }}>复制</button>
+        </div>
+        {locate(q.text.slice(0, 16))}
+      </>
+    )
+  } else if (sel.kind === 'custom' || sel.kind === 'customGroup') {
+    const f = focusOf(map).find(f => f.id === sel.id)
+    const groups = map.custom?.[sel.id] || []
+    if (f && sel.kind === 'customGroup') {
+      const g = groups.find(g => g.name === sel.name)
+      if (g) body = (
+        <>
+          <div className="mm-d-kind">{f.title}</div>
+          <div className="mm-d-name">{g.name || '其他'}</div>
+          <Section title={`包含（${g.items.length}）`}>{g.items.map(i => <div key={i.name} className="mm-d-item"><button className="mm-link" onClick={() => setSel({ kind: 'custom', id: sel.id, name: i.name })}>{i.name}</button><span>{i.desc}</span></div>)}</Section>
+        </>
+      )
+    } else if (f) {
+      const g = groups.find(g => g.items.some(i => i.name === sel.name))
+      const it = g?.items.find(i => i.name === sel.name)
+      if (it) body = (
+        <>
+          <div className="mm-d-kind">{f.title}{g.name ? ` · ${g.name}` : ''}</div>
+          <div className="mm-d-name">{it.name}</div>
+          {it.desc && <p className="mm-d-desc">{it.desc}</p>}
+          {locate(it.name)}
+        </>
+      )
+    }
   }
   if (!body) body = <div className="muted">这一项在最新的导图里已经没有了。</div>
   return (

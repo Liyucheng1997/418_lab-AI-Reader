@@ -1,4 +1,5 @@
 // 思维导图：数据 → 树 → 左右展开的布局；人物关系：力导向布局；导出 Markdown
+import { focusOf } from './focus.js'
 
 export const BRANCH_COLORS = ['#0071e3', '#ff9500', '#34c759', '#af52de', '#ff2d55', '#30b0c7', '#5856d6', '#a2845e']
 export const GROUP_COLORS = ['#0071e3', '#ff9500', '#34c759', '#af52de', '#ff2d55', '#30b0c7', '#5856d6', '#a2845e', '#ffcc00', '#8e8e93']
@@ -10,95 +11,171 @@ export function palette(dark) {
 }
 
 // ---------- 数据 → 树 ----------
-// 节点：{ id, label, sub, level, branch, ref: { kind, name, index }, children, collapsed }
+// 节点：{ id, label, sub, level, branch, ref: { kind, name, index, id }, children, collapsed }
+// 一级分支按读者选的侧重点和顺序来
 export function buildTree(map, title) {
   let n = 0
   const node = (label, extra = {}) => ({ id: 'n' + n++, label, sub: '', children: [], ...extra })
   const root = node(title, { level: 0, ref: { kind: 'book' }, sub: map.genre || '' })
   const top = []
 
-  const chars = map.characters || []
-  if (chars.length) {
-    const b = node('人物', { ref: { kind: 'branch', name: 'characters' } })
-    const rels = map.relations || []
-    const charNode = c => {
-      const cn = node(c.name, { sub: c.role === '主角' ? `主角 · ${c.desc}` : c.desc, ref: { kind: 'character', name: c.name }, star: c.role === '主角' })
-      if (c.role !== '次要') {
-        cn.children = rels.filter(r => r.from === c.name || r.to === c.name).map(r => {
-          const other = r.from === c.name ? r.to : r.from
-          return node(`${other} · ${r.type}`, { sub: r.desc, ref: { kind: 'character', name: other } })
+  const branchOf = {
+    characters() {
+      const chars = map.characters || []
+      if (!chars.length) return null
+      const b = node('人物', { ref: { kind: 'branch' } })
+      const rels = map.relations || []
+      const charNode = c => {
+        const cn = node(c.name, { sub: c.role === '主角' ? `主角 · ${c.desc}` : c.desc, ref: { kind: 'character', name: c.name }, star: c.role === '主角' })
+        if (c.role !== '次要') {
+          cn.children = rels.filter(r => r.from === c.name || r.to === c.name).map(r => {
+            const other = r.from === c.name ? r.to : r.from
+            return node(`${other} · ${r.type}`, { sub: r.desc, ref: { kind: 'character', name: other } })
+          })
+          cn.collapsed = true
+        }
+        return cn
+      }
+      const groups = (map.groups || []).map(g => g.name)
+      const named = [...new Set([...groups, ...chars.map(c => c.group).filter(Boolean)])]
+      const order = { 主角: 0, 主要: 1, 次要: 2 }
+      const sorted = [...chars].sort((a, b) => order[a.role] - order[b.role])
+      if (named.length > 1) {
+        for (const g of named) {
+          const members = sorted.filter(c => c.group === g)
+          if (!members.length) continue
+          const gn = node(g, { ref: { kind: 'group', name: g }, sub: `${members.length} 人` })
+          gn.children = members.map(charNode)
+          b.children.push(gn)
+        }
+        const rest = sorted.filter(c => !c.group || !named.includes(c.group))
+        if (rest.length) { const gn = node('其他', { ref: { kind: 'group', name: '其他' } }); gn.children = rest.map(charNode); b.children.push(gn) }
+      } else {
+        for (const role of ['主角', '主要', '次要']) {
+          const members = sorted.filter(c => c.role === role)
+          if (!members.length) continue
+          const gn = node(role === '主角' ? '主角' : role === '主要' ? '主要人物' : '次要人物', { ref: { kind: 'branch' }, sub: `${members.length} 人` })
+          gn.children = members.map(charNode)
+          if (role === '次要' && members.length > 8) gn.collapsed = true
+          b.children.push(gn)
+        }
+      }
+      return b
+    },
+    concepts() {
+      const cats = map.conceptCategories || []
+      if (!cats.length) return null
+      const b = node('核心概念', { ref: { kind: 'branch' } })
+      b.children = cats.map(c => {
+        const cn = node(c.name, { ref: { kind: 'category', name: c.name }, sub: `${c.items.length} 项` })
+        cn.children = c.items.map(i => node(i.name, { sub: i.desc, ref: { kind: 'concept', name: i.name } }))
+        return cn
+      })
+      return b
+    },
+    themes() {
+      if (!map.themes?.length) return null
+      const b = node('主题', { ref: { kind: 'branch' } })
+      b.children = map.themes.map(t => node(t.name, { sub: t.desc, ref: { kind: 'theme', name: t.name } }))
+      return b
+    },
+    plot() {
+      if (!map.timeline?.length) return null
+      const b = node('情节脉络', { ref: { kind: 'branch' } })
+      b.children = map.timeline.map((e, i) => node(`${i + 1}. ${e.title}`, { sub: e.chapter || e.desc, ref: { kind: 'event', index: i } }))
+      return b
+    },
+    places() {
+      if (!map.places?.length) return null
+      const b = node('地点', { ref: { kind: 'branch' } })
+      b.children = map.places.map(p => node(p.name, { sub: p.desc, ref: { kind: 'place', name: p.name } }))
+      return b
+    },
+    outline() {
+      const list = map.outline || []
+      if (!list.length) return null
+      const groups = [...new Set(list.map(o => o.group).filter(Boolean))]
+      const grouped = groups.length >= 2
+      const b = node('章节框架', { ref: { kind: 'branch' }, sub: grouped ? `${groups.length} 章 · ${list.length} 节` : `${list.length} 章` })
+      const many = list.length > 8
+      const secNode = (o, i) => {
+        const cn = node(o.chapter, { sub: many ? o.points[0] || '' : `${o.points.length} 个要点`, ref: { kind: 'chapter', index: i } })
+        cn.children = o.points.map((p, j) => node(p, { ref: { kind: 'chapter', index: i, point: j } }))
+        cn.collapsed = many // 章节多时先收起，点开看要点
+        return cn
+      }
+      if (!grouped) b.children = list.map(secNode)
+      else {
+        // 按章分组：章 → 节 → 要点（顺序按第一次出现）
+        const order = []
+        for (const o of list) { const g = o.group || '开篇'; if (!order.includes(g)) order.push(g) }
+        const same = (a, b) => a.replace(/\s/g, '') === b.replace(/\s/g, '')
+        b.children = order.map(g => {
+          const all = list.map((o, i) => [o, i]).filter(([o]) => (o.group || '开篇') === g)
+          // 章的标题页：要点直接挂在章下面
+          const own = all.filter(([o]) => same(o.chapter, g))
+          const secs = all.filter(([o]) => !same(o.chapter, g))
+          const gn = node(g, { sub: secs.length ? `${secs.length} 节` : `${own.reduce((s, [o]) => s + o.points.length, 0)} 个要点`, ref: own.length ? { kind: 'chapter', index: own[0][1] } : { kind: 'branch' } })
+          gn.children = [
+            ...own.flatMap(([o, i]) => o.points.map((p, j) => node(p, { ref: { kind: 'chapter', index: i, point: j } }))),
+            ...secs.map(([o, i]) => secNode(o, i)),
+          ]
+          return gn
         })
-        cn.collapsed = true
       }
-      return cn
-    }
-    const groups = (map.groups || []).map(g => g.name)
-    const named = [...new Set([...groups, ...chars.map(c => c.group).filter(Boolean)])]
-    const order = { 主角: 0, 主要: 1, 次要: 2 }
-    const sorted = [...chars].sort((a, b) => order[a.role] - order[b.role])
-    if (named.length > 1) {
-      for (const g of named) {
-        const members = sorted.filter(c => c.group === g)
-        if (!members.length) continue
-        const gn = node(g, { ref: { kind: 'group', name: g }, sub: `${members.length} 人` })
-        gn.children = members.map(charNode)
-        b.children.push(gn)
-      }
-      const rest = sorted.filter(c => !c.group || !named.includes(c.group))
-      if (rest.length) { const gn = node('其他', { ref: { kind: 'group', name: '其他' } }); gn.children = rest.map(charNode); b.children.push(gn) }
-    } else {
-      for (const role of ['主角', '主要', '次要']) {
-        const members = sorted.filter(c => c.role === role)
-        if (!members.length) continue
-        const gn = node(role === '主角' ? '主角' : role === '主要' ? '主要人物' : '次要人物', { ref: { kind: 'branch', name: 'characters' }, sub: `${members.length} 人` })
-        gn.children = members.map(charNode)
-        if (role === '次要' && members.length > 8) gn.collapsed = true
-        b.children.push(gn)
-      }
-    }
-    top.push(b)
+      return b
+    },
+    methods() {
+      const list = map.methods || []
+      if (!list.length) return null
+      const b = node('方法', { ref: { kind: 'branch' } })
+      b.children = list.map(m => {
+        const mn = node(m.name, { sub: m.desc, ref: { kind: 'method', name: m.name } })
+        mn.children = (m.steps || []).map((s, j) => node(`${j + 1}. ${s}`, { ref: { kind: 'method', name: m.name } }))
+        mn.collapsed = list.length > 6
+        return mn
+      })
+      return b
+    },
+    quotes() {
+      const list = map.quotes || []
+      if (!list.length) return null
+      const b = node('金句', { ref: { kind: 'branch' } })
+      b.children = list.map((q, i) => node(`“${q.text}”`, { sub: q.note, ref: { kind: 'quote', index: i } }))
+      return b
+    },
+    custom(f) {
+      const groups = map.custom?.[f.id] || []
+      const items = groups.reduce((s, g) => s + g.items.length, 0)
+      if (!items) return null
+      const b = node(f.title, { ref: { kind: 'branch' } })
+      const itemNode = i => node(i.name, { sub: i.desc, ref: { kind: 'custom', id: f.id, name: i.name } })
+      // 只有一组且没有组名（边读边画时的初稿）：直接挂在分支下
+      if (groups.length === 1 && !groups[0].name) b.children = groups[0].items.map(itemNode)
+      else b.children = groups.map(g => {
+        const gn = node(g.name || '其他', { sub: `${g.items.length} 项`, ref: { kind: 'customGroup', id: f.id, name: g.name } })
+        gn.children = g.items.map(itemNode)
+        return gn
+      })
+      return b
+    },
   }
 
-  const cats = map.conceptCategories || []
-  if (cats.length) {
-    const b = node('核心概念', { ref: { kind: 'branch', name: 'concepts' } })
-    b.children = cats.map(c => {
-      const cn = node(c.name, { ref: { kind: 'category', name: c.name }, sub: `${c.items.length} 项` })
-      cn.children = c.items.map(i => node(i.name, { sub: i.desc, ref: { kind: 'concept', name: i.name } }))
-      return cn
-    })
-    top.push(b)
-  }
-
-  if (map.themes?.length) {
-    const b = node('主题', { ref: { kind: 'branch', name: 'themes' } })
-    b.children = map.themes.map(t => node(t.name, { sub: t.desc, ref: { kind: 'theme', name: t.name } }))
-    top.push(b)
-  }
-
-  if (map.timeline?.length) {
-    const b = node('情节脉络', { ref: { kind: 'branch', name: 'timeline' } })
-    b.children = map.timeline.map((e, i) => node(`${i + 1}. ${e.title}`, { sub: e.chapter || e.desc, ref: { kind: 'event', index: i } }))
-    top.push(b)
-  }
-
-  if (map.places?.length) {
-    const b = node('地点', { ref: { kind: 'branch', name: 'places' } })
-    b.children = map.places.map(p => node(p.name, { sub: p.desc, ref: { kind: 'place', name: p.name } }))
-    top.push(b)
-  }
+  focusOf(map).forEach((f, fi) => {
+    const b = branchOf[f.kind]?.(f)
+    if (b) { b.fi = fi; top.push(b) }
+  })
 
   root.children = top
-  // 一级分支的颜色按名字固定，边读边画时新长出的分支不会让别的分支换颜色
-  const BRANCH_ORDER = ['人物', '核心概念', '主题', '情节脉络', '地点']
+  // 一级分支的颜色按侧重点的顺序固定，边读边画时新长出的分支不会让别的分支换颜色
   const walk = (x, level, branch, key) => {
     x.level = level
     x.branch = branch
     x.key = key
     const seen = {}
     x.children.forEach(c => {
-      const n = (seen[c.label] = (seen[c.label] || 0) + 1)
-      walk(c, level + 1, level === 0 ? Math.max(0, BRANCH_ORDER.indexOf(c.label)) : branch, key + '/' + c.label + (n > 1 ? '#' + n : ''))
+      const k = (seen[c.label] = (seen[c.label] || 0) + 1)
+      walk(c, level + 1, level === 0 ? c.fi ?? 0 : branch, key + '/' + c.label + (k > 1 ? '#' + k : ''))
     })
   }
   walk(root, 0, -1, '')
@@ -361,52 +438,97 @@ export function graphBBox(nodes) {
   return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
 }
 
-// ---------- 导出 Markdown ----------
+// ---------- 导出 Markdown（按侧重点的顺序） ----------
 export function toMarkdown(map, record) {
   const L = [`# 《${record.title}》思维导图`, '']
   if (record.author) L.push(`作者：${record.author}`, '')
   if (map.summary) L.push(`> ${map.summary}`, '')
-  if (map.themes?.length) {
-    L.push('## 主题', '')
-    for (const t of map.themes) L.push(`- **${t.name}**${t.desc ? `：${t.desc}` : ''}`)
-    L.push('')
-  }
-  if (map.characters?.length) {
-    L.push('## 人物', '')
-    const groups = [...new Set(map.characters.map(c => c.group || '其他'))]
-    for (const g of groups) {
-      if (groups.length > 1) L.push(`### ${g}`, '')
-      for (const c of map.characters.filter(c => (c.group || '其他') === g)) {
-        L.push(`- **${c.name}**（${c.role}）${c.aliases?.length ? `　又称：${c.aliases.join('、')}` : ''}`)
-        if (c.desc) L.push(`  - ${c.desc}`)
-        if (c.traits?.length) L.push(`  - 特点：${c.traits.join('、')}`)
-        if (c.arc) L.push(`  - 经历：${c.arc}`)
+  const sec = {
+    characters() {
+      if (!map.characters?.length) return
+      L.push('## 人物', '')
+      const groups = [...new Set(map.characters.map(c => c.group || '其他'))]
+      for (const g of groups) {
+        if (groups.length > 1) L.push(`### ${g}`, '')
+        for (const c of map.characters.filter(c => (c.group || '其他') === g)) {
+          L.push(`- **${c.name}**（${c.role}）${c.aliases?.length ? `　又称：${c.aliases.join('、')}` : ''}`)
+          if (c.desc) L.push(`  - ${c.desc}`)
+          if (c.traits?.length) L.push(`  - 特点：${c.traits.join('、')}`)
+          if (c.arc) L.push(`  - 经历：${c.arc}`)
+        }
+        L.push('')
+      }
+      if (map.relations?.length) {
+        L.push('## 人物关系', '')
+        for (const r of map.relations) L.push(`- ${r.from} — ${r.to}：${r.type}${r.desc ? `（${r.desc}）` : ''}`)
+        L.push('')
+      }
+    },
+    concepts() {
+      if (!map.conceptCategories?.length) return
+      L.push('## 核心概念', '')
+      for (const c of map.conceptCategories) {
+        L.push(`### ${c.name}`, '')
+        for (const i of c.items) L.push(`- **${i.name}**${i.desc ? `：${i.desc}` : ''}${i.related?.length ? `（相关：${i.related.join('、')}）` : ''}`)
+        L.push('')
+      }
+    },
+    themes() {
+      if (!map.themes?.length) return
+      L.push('## 主题', '')
+      for (const t of map.themes) L.push(`- **${t.name}**${t.desc ? `：${t.desc}` : ''}`)
+      L.push('')
+    },
+    plot() {
+      if (!map.timeline?.length) return
+      L.push('## 情节脉络', '')
+      map.timeline.forEach((e, i) => L.push(`${i + 1}. **${e.title}**${e.chapter ? `〔${e.chapter}〕` : ''}${e.desc ? `：${e.desc}` : ''}`))
+      L.push('')
+    },
+    places() {
+      if (!map.places?.length) return
+      L.push('## 地点', '')
+      for (const p of map.places) L.push(`- **${p.name}**${p.desc ? `：${p.desc}` : ''}`)
+      L.push('')
+    },
+    outline() {
+      if (!map.outline?.length) return
+      L.push('## 章节框架', '')
+      for (const o of map.outline) {
+        L.push(`### ${o.chapter}`, '')
+        for (const p of o.points) L.push(`- ${p}`)
+        L.push('')
+      }
+    },
+    methods() {
+      if (!map.methods?.length) return
+      L.push('## 方法', '')
+      for (const m of map.methods) {
+        L.push(`- **${m.name}**${m.desc ? `：${m.desc}` : ''}`)
+        ;(m.steps || []).forEach((s, i) => L.push(`  ${i + 1}. ${s}`))
       }
       L.push('')
-    }
+    },
+    quotes() {
+      if (!map.quotes?.length) return
+      L.push('## 金句', '')
+      for (const q of map.quotes) {
+        L.push(`> ${q.text}`)
+        if (q.note) L.push('>', `> —— ${q.note}`)
+        L.push('')
+      }
+    },
+    custom(f) {
+      const groups = map.custom?.[f.id] || []
+      if (!groups.some(g => g.items.length)) return
+      L.push(`## ${f.title}`, '')
+      for (const g of groups) {
+        if (g.name) L.push(`### ${g.name}`, '')
+        for (const i of g.items) L.push(`- **${i.name}**${i.desc ? `：${i.desc}` : ''}`)
+        L.push('')
+      }
+    },
   }
-  if (map.relations?.length) {
-    L.push('## 人物关系', '')
-    for (const r of map.relations) L.push(`- ${r.from} — ${r.to}：${r.type}${r.desc ? `（${r.desc}）` : ''}`)
-    L.push('')
-  }
-  if (map.conceptCategories?.length) {
-    L.push('## 核心概念', '')
-    for (const c of map.conceptCategories) {
-      L.push(`### ${c.name}`, '')
-      for (const i of c.items) L.push(`- **${i.name}**${i.desc ? `：${i.desc}` : ''}${i.related?.length ? `（相关：${i.related.join('、')}）` : ''}`)
-      L.push('')
-    }
-  }
-  if (map.timeline?.length) {
-    L.push('## 情节脉络', '')
-    map.timeline.forEach((e, i) => L.push(`${i + 1}. **${e.title}**${e.chapter ? `〔${e.chapter}〕` : ''}${e.desc ? `：${e.desc}` : ''}`))
-    L.push('')
-  }
-  if (map.places?.length) {
-    L.push('## 地点', '')
-    for (const p of map.places) L.push(`- **${p.name}**${p.desc ? `：${p.desc}` : ''}`)
-    L.push('')
-  }
+  for (const f of focusOf(map)) sec[f.kind]?.(f)
   return L.join('\n')
 }
