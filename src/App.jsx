@@ -5,6 +5,7 @@ import Library from './library/Library.jsx'
 import Reader from './reader/Reader.jsx'
 import SettingsDialog from './settings/SettingsDialog.jsx'
 import { UpdateBanner } from './settings/update.jsx'
+import MindMap from './mindmap/MindMap.jsx'
 
 const JUNK_META = /^(administrator|admin|user|unknown|anonymous|untitled|microsoft|作者|无标题|未知)\b|crack|^document\d*$|\.(docx?|pdf|indd|tex)$/i
 
@@ -15,6 +16,7 @@ export default function App() {
   const [lib, setLib] = useState(null)
   const [readingId, setReadingId] = useState(null)
   const [settingsTab, setSettingsTab] = useState(null)
+  const [mindMapId, setMindMapId] = useState(null) // 从书库打开的思维导图
   const [parsing, setParsing] = useState(0)
   const queue = useRef([])
   const busy = useRef(false)
@@ -130,11 +132,13 @@ export default function App() {
     afterImport,
     parsing,
     openBook: id => setReadingId(id),
+    openMindMap: id => setMindMapId(id),
     openSettings: (tab = 'general') => setSettingsTab(tab),
   }), [lib, afterImport, parsing])
 
   if (!lib) return null
   const reading = readingId && lib.books.find(b => b.id === readingId)
+  const mindBook = mindMapId && !reading && lib.books.find(b => b.id === mindMapId)
   return (
     <LibCtx.Provider value={api}>
       <div className="app">
@@ -142,6 +146,10 @@ export default function App() {
           ? <Reader key={reading.id} book={reading} onClose={() => setReadingId(null)} />
           : <Library />}
       </div>
+      {mindBook && (
+        <MindMap key={mindBook.id} record={mindBook} onClose={() => setMindMapId(null)}
+          onOpenBook={() => { setMindMapId(null); setReadingId(mindBook.id) }} />
+      )}
       {settingsTab && <SettingsDialog tab={settingsTab} onClose={() => setSettingsTab(null)} />}
       <UpdateBanner />
       <UIHost />

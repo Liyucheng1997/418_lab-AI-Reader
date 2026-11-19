@@ -50,7 +50,9 @@ class Store {
     this.dir = dir
     this.file = path.join(dir, 'library.json')
     this.chatDir = path.join(dir, 'chats')
+    this.mindDir = path.join(dir, 'mindmaps') // 思维导图：每本书一个 JSON
     fs.mkdirSync(this.chatDir, { recursive: true })
+    fs.mkdirSync(this.mindDir, { recursive: true })
     // linkedRoots：关联文件夹（OneDrive 等，只建索引不复制）；linkedExcluded：从书库移除的关联图书，重新扫描时跳过
     this.data = { books: [], folders: [], annotations: {}, settings: DEFAULT_SETTINGS, linkedRoots: [], linkedExcluded: [] }
     try {
@@ -78,6 +80,16 @@ class Store {
   }
   deleteChat(bookId) {
     fs.rmSync(path.join(this.chatDir, bookId + '.json'), { force: true })
+    fs.rmSync(path.join(this.mindDir, bookId + '.json'), { force: true })
+  }
+  getMindMap(bookId) {
+    try { return JSON.parse(fs.readFileSync(path.join(this.mindDir, bookId + '.json'), 'utf8')) } catch { return null }
+  }
+  setMindMap(bookId, doc) {
+    const file = path.join(this.mindDir, bookId + '.json')
+    if (!doc) return fs.rmSync(file, { force: true })
+    fs.writeFileSync(file + '.tmp', JSON.stringify(doc))
+    fs.renameSync(file + '.tmp', file)
   }
 }
 

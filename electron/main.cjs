@@ -393,6 +393,8 @@ function setupIpc() {
 
   h('chat:get', bookId => store.getChat(bookId))
   h('chat:set', (bookId, messages) => { store.setChat(bookId, messages); return true })
+  h('mindmap:get', bookId => store.getMindMap(bookId))
+  h('mindmap:set', (bookId, doc) => { store.setMindMap(bookId, doc); return true })
 
   h('settings:set', patch => {
     store.data.settings = mergeDeep(store.data.settings, patch)
@@ -409,12 +411,22 @@ function setupIpc() {
   h('win:overlay', dark => win?.setTitleBarOverlay(overlayColors(dark)))
   h('win:fullscreen', () => { win.setFullScreen(!win.isFullScreen()); return win.isFullScreen() })
 
-  h('file:save-text', async (defaultName, content) => {
-    const res = await dialog.showSaveDialog(win, { defaultPath: defaultName, filters: [{ name: 'Markdown', extensions: ['md'] }, { name: '文本', extensions: ['txt'] }] })
+  // 按默认文件名的扩展名给出保存类型（.md / .svg / .png …）
+  const SAVE_FILTERS = {
+    md: [{ name: 'Markdown', extensions: ['md'] }, { name: '文本', extensions: ['txt'] }],
+    svg: [{ name: 'SVG 图片', extensions: ['svg'] }],
+    png: [{ name: 'PNG 图片', extensions: ['png'] }],
+    json: [{ name: 'JSON', extensions: ['json'] }],
+  }
+  const saveAs = async (defaultName, content, encoding) => {
+    const ext = path.extname(defaultName).slice(1).toLowerCase()
+    const res = await dialog.showSaveDialog(win, { defaultPath: defaultName, filters: SAVE_FILTERS[ext] || SAVE_FILTERS.md })
     if (res.canceled) return null
-    fs.writeFileSync(res.filePath, content, 'utf8')
+    fs.writeFileSync(res.filePath, encoding ? content : Buffer.from(content), encoding)
     return res.filePath
-  })
+  }
+  h('file:save-text', (defaultName, content) => saveAs(defaultName, content, 'utf8'))
+  h('file:save-binary', (defaultName, bytes) => saveAs(defaultName, bytes))
   h('shell:open', url => { if (/^https?:/.test(url)) shell.openExternal(url) })
 
   h('app:version', () => app.getVersion())

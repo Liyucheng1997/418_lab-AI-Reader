@@ -2,7 +2,7 @@
 import {
   FolderPlus, Pencil, Trash2, Download, FolderInput, BookOpen, Star, StarOff, FolderMinus,
   FolderOpen, Info, CheckCircle2, Circle, BookMarked, Folder, FolderSync, RefreshCw, Unlink,
-  CloudDownload, CloudOff, ImageDown,
+  CloudDownload, CloudOff, ImageDown, Network,
 } from 'lucide-react'
 import { childrenOf } from './model.js'
 import { confirmDialog, promptDialog, toast } from '../lib/ui.jsx'
@@ -187,6 +187,7 @@ export function bookMenu(lib, books, view, { onEdit, clearSel }) {
   const linked = books.filter(b => b.linked)
   return [
     one && { label: one.progress > 0 ? '继续阅读' : '开始阅读', icon: BookOpen, onClick: () => lib.openBook(one.id) },
+    one && { label: '思维导图（人物、概念）', icon: Network, onClick: () => lib.openMindMap(one.id) },
     one && { sep: true },
     {
       label: '添加 / 移动到文件夹', icon: FolderPlus,

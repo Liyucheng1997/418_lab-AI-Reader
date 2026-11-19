@@ -42,11 +42,14 @@ contextBridge.exposeInMainWorld('api', {
   allAnnotations: () => invoke('ann:all'),
   getChat: bookId => invoke('chat:get', bookId),
   setChat: (bookId, messages) => invoke('chat:set', bookId, messages),
+  getMindMap: bookId => invoke('mindmap:get', bookId),
+  setMindMap: (bookId, doc) => invoke('mindmap:set', bookId, doc),
 
   setSettings: patch => invoke('settings:set', patch),
   setOverlay: dark => invoke('win:overlay', dark),
   toggleFullscreen: () => invoke('win:fullscreen'),
   saveText: (name, content) => invoke('file:save-text', name, content),
+  saveBinary: (name, bytes) => invoke('file:save-binary', name, bytes),
   openExternal: url => invoke('shell:open', url),
 
   appVersion: () => invoke('app:version'),

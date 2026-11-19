@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowLeft, List, Search, Bookmark, BookmarkCheck, NotebookPen, Type, Sparkles, Volume2, Square,
-  Maximize, Minimize, ChevronLeft, ChevronRight,
+  Maximize, Minimize, ChevronLeft, ChevronRight, Network,
 } from 'lucide-react'
 import { useLib } from '../App.jsx'
 import { loadFoliate, openBookRecord } from '../lib/foliate.js'
@@ -14,6 +14,7 @@ import SearchPanel from './SearchPanel.jsx'
 import AIPanel from './AIPanel.jsx'
 import TypeSettings from './TypeSettings.jsx'
 import SelectionPopup from './SelectionPopup.jsx'
+import MindMap from '../mindmap/MindMap.jsx'
 
 const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36)
 
@@ -37,6 +38,7 @@ export default function Reader({ book: record, onClose }) {
   const [speaking, setSpeaking] = useState(false)
   const [full, setFull] = useState(false)
   const [scrub, setScrub] = useState(null)
+  const [mindOpen, setMindOpen] = useState(false)
   const annsRef = useRef([])
   const rsRef = useRef(rs)
   const locRef = useRef(null)
@@ -686,6 +688,7 @@ export default function Reader({ book: record, onClose }) {
             onContextMenu={e => { e.preventDefault(); lib.openSettings('tts') }}>
             {speaking ? <Square size={15} fill="currentColor" /> : <Volume2 size={17} strokeWidth={1.75} />}
           </button>
+          <button className={`icon-btn ${mindOpen ? 'on' : ''}`} title="思维导图：人物、关系、概念" onClick={() => setMindOpen(true)}><Network size={17} strokeWidth={1.75} /></button>
           <button className="icon-btn" title="全屏 (F11)" onClick={toggleFull}>{full ? <Minimize size={17} strokeWidth={1.75} /> : <Maximize size={17} strokeWidth={1.75} />}</button>
           <button className={`ai-btn ${right === 'ai' ? 'on' : ''}`} title="AI 助手 (Ctrl+J)" onClick={() => setRight(r => r === 'ai' ? null : 'ai')}>
             <Sparkles size={15} strokeWidth={2} />AI 助手
@@ -740,6 +743,15 @@ export default function Reader({ book: record, onClose }) {
           {pct}%
         </span>
       </footer>
+
+      {mindOpen && (
+        <MindMap record={record} onClose={() => setMindOpen(false)}
+          onLocate={text => {
+            setMindOpen(false)
+            setRight('search')
+            setTimeout(() => window.dispatchEvent(new CustomEvent('air-search', { detail: text })), 50)
+          }} />
+      )}
 
       {popup && (
         <SelectionPopup popup={popup} onClose={() => setPopup(null)}
