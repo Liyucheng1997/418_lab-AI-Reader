@@ -89,12 +89,19 @@ export function buildTree(map, title) {
   }
 
   root.children = top
-  const walk = (x, level, branch) => {
+  // 一级分支的颜色按名字固定，边读边画时新长出的分支不会让别的分支换颜色
+  const BRANCH_ORDER = ['人物', '核心概念', '主题', '情节脉络', '地点']
+  const walk = (x, level, branch, key) => {
     x.level = level
     x.branch = branch
-    x.children.forEach((c, i) => walk(c, level + 1, level === 0 ? i : branch))
+    x.key = key
+    const seen = {}
+    x.children.forEach(c => {
+      const n = (seen[c.label] = (seen[c.label] || 0) + 1)
+      walk(c, level + 1, level === 0 ? Math.max(0, BRANCH_ORDER.indexOf(c.label)) : branch, key + '/' + c.label + (n > 1 ? '#' + n : ''))
+    })
   }
-  walk(root, 0, -1)
+  walk(root, 0, -1, '')
   return root
 }
 
@@ -165,7 +172,8 @@ function place(n, edgeX, centerY, side) {
 }
 
 // 返回 { nodes, links, bbox }；节点坐标为中心点
-export function layoutTree(root) {
+// sides：一级分支放在左边还是右边（按名字记住），边读边画时分支不会左右跳来跳去
+export function layoutTree(root, sides = null) {
   const all = []
   const visit = n => { measure(n); all.push(n); for (const c of n.children) visit(c) }
   visit(root)
@@ -176,8 +184,17 @@ export function layoutTree(root) {
   const total = kids.reduce((s, c) => s + c._sh, 0)
   let acc = 0
   const right = [], left = []
-  for (const c of kids) {
-    if (acc < total / 2 || !right.length) { right.push(c); acc += c._sh } else left.push(c)
+  if (sides) {
+    let rh = 0, lh = 0
+    for (const c of kids) {
+      const side = sides.get(c.label) ?? (rh <= lh ? 1 : -1)
+      sides.set(c.label, side)
+      if (side > 0) { right.push(c); rh += c._sh } else { left.push(c); lh += c._sh }
+    }
+  } else {
+    for (const c of kids) {
+      if (acc < total / 2 || !right.length) { right.push(c); acc += c._sh } else left.push(c)
+    }
   }
   const stack = (list, side) => {
     const gap = VGAP[0]
@@ -230,11 +247,28 @@ export function layoutGraph(chars, relations, prev = {}) {
   const nodes = chars.map((c, i) => {
     const r = c.role === '主角' ? 26 : c.role === '主要' ? 19 : 13
     const p = prev[c.name]
-    const a = (i / Math.max(1, chars.length)) * Math.PI * 2
-    return { id: c.name, c, r, x: p?.x ?? Math.cos(a) * 300 + (i % 7), y: p?.y ?? Math.sin(a) * 300 + (i % 5) }
+    let x = p?.x, y = p?.y
+    if (x == null) {
+      const friend = relations.map(rel => rel.from === c.name ? rel.to : rel.to === c.name ? rel.from : null).find(n => n && prev[n])
+      const a = (i * 2.399963) % (Math.PI * 2) // 黄金角，分散开
+      const base = friend ? prev[friend] : { x: 0, y: 0 }
+      const d = friend ? 90 : 300
+      x = base.x + Math.cos(a) * d
+      y = base.y + Math.sin(a) * d
+    }
+    return { id: c.name, c, r, x, y }
   })
   const idx = new Map(nodes.map((n, i) => [n.id, i]))
-  const edges = relations.filter(r => idx.has(r.from) && idx.has(r.to)).map(r => ({ s: idx.get(r.from), t: idx.get(r.to), rel: r }))
+  // 同一对人物的多条关系合成一条线，标签用“、”连起来，免得叠在一起
+  const pairs = new Map()
+  for (const r of relations) {
+    if (!idx.has(r.from) || !idx.has(r.to) || r.from === r.to) continue
+    const k = [r.from, r.to].sort().join('|')
+    const e = pairs.get(k)
+    if (!e) pairs.set(k, { s: idx.get(r.from), t: idx.get(r.to), rel: { ...r } })
+    else if (r.type && !e.rel.type.split('、').includes(r.type) && e.rel.type.split('、').length < 2) e.rel.type += '、' + r.type
+  }
+  const edges = [...pairs.values()]
   const n = nodes.length
   if (!n) return { nodes, edges }
   const deg = new Array(n).fill(0)
@@ -242,7 +276,24 @@ export function layoutGraph(chars, relations, prev = {}) {
   // 没有关系的人物不参与模拟（否则会被斥力推得很远），最后排在关系网下方
   const live = nodes.map((_, i) => i).filter(i => deg[i])
   const m = live.length
-  const k = Math.sqrt((700 * 560) / Math.max(1, m)) * 0.8
+  // 连通块大小：只有两三个人的小圈子引力大一些，别被主关系网推到远处
+  const comp = new Array(n).fill(-1), compSize = []
+  for (const s0 of live) {
+    if (comp[s0] >= 0) continue
+    const id = compSize.length, stack = [s0]
+    comp[s0] = id
+    let size = 0
+    while (stack.length) {
+      const v = stack.pop(); size++
+      for (const e of edges) {
+        const u = e.s === v ? e.t : e.t === v ? e.s : -1
+        if (u >= 0 && comp[u] < 0) { comp[u] = id; stack.push(u) }
+      }
+    }
+    compSize.push(size)
+  }
+  const biggest = Math.max(0, ...compSize)
+  const k = Math.sqrt((900 * 720) / Math.max(1, m)) * 0.8
   const warm = live.some(i => prev[nodes[i].id])
   const iters = warm ? 120 : 450
   let temp = warm ? k * 0.5 : k * 2
@@ -256,6 +307,7 @@ export function layoutGraph(chars, relations, prev = {}) {
         let d2 = x * x + y * y
         if (d2 < 0.01) { x = Math.random() - 0.5; y = Math.random() - 0.5; d2 = 0.5 }
         const d = Math.sqrt(d2)
+        if (d > k * 2.6) continue // 远处的点不再互相推
         const min = nodes[i].r + nodes[j].r + 46
         const f = (k * k) / d + (d < min ? (min - d) * 4 : 0)
         dx[i] += (x / d) * f; dy[i] += (y / d) * f
@@ -271,8 +323,9 @@ export function layoutGraph(chars, relations, prev = {}) {
       dx[e.t] += (x / d) * f; dy[e.t] += (y / d) * f
     }
     for (const i of live) {
-      dx[i] -= nodes[i].x * 0.09
-      dy[i] -= nodes[i].y * 0.09
+      const g = compSize[comp[i]] === biggest ? 0.09 : 0.3
+      dx[i] -= nodes[i].x * g
+      dy[i] -= nodes[i].y * g
       const d = Math.sqrt(dx[i] * dx[i] + dy[i] * dy[i]) || 1
       const step = Math.min(d, temp)
       nodes[i].x += (dx[i] / d) * step

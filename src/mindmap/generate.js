@@ -8,12 +8,14 @@ import { openBookRecord } from '../lib/foliate.js'
 import { ocrPageText } from '../reader/ocrLayer.js'
 
 export const DETAIL = {
-  fast: { label: '快速', chunk: 80000, hint: '分段少、速度快，适合先看个大概' },
-  normal: { label: '标准', chunk: 40000, hint: '兼顾速度和细节' },
-  fine: { label: '精细', chunk: 20000, hint: '分段多，次要人物和概念也能抓到' },
+  fast: { label: '快速', chunk: 48000, hint: '分段少、AI 调用少，适合先看个大概' },
+  normal: { label: '标准', chunk: 24000, hint: '兼顾速度和细节' },
+  fine: { label: '精细', chunk: 12000, hint: '分段多，次要人物和概念也能抓到' },
 }
+const FIRST_CHUNK = 8000 // 第一段短一些，导图能早点出来
 const CONCURRENCY = 3
-const VERSION = 1
+const LOOKAHEAD = 2 // 边读边画时，AI 最多比阅读位置领先几段
+const VERSION = 2
 
 const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36)
 
@@ -71,7 +73,7 @@ async function bookParts(record) {
 }
 
 // 按字数切段：段内保留【章节】标记，方便 AI 标注章节
-export function makeChunks(parts, size) {
+export function makeChunks(parts, size, first = size) {
   const chunks = []
   let cur = null
   const push = () => { if (cur?.text.trim()) chunks.push(cur); cur = null }
@@ -81,7 +83,7 @@ export function makeChunks(parts, size) {
     while (text) {
       if (!cur) cur = { text: '', from: p.label, to: p.label }
       if (!marked && p.label) { cur.text += `\n【${p.label}】\n`; marked = true }
-      const room = size - cur.text.length
+      const room = (chunks.length ? size : first) - cur.text.length
       if (text.length <= room) {
         cur.text += text + '\n'
         cur.to = p.label || cur.to
@@ -100,7 +102,13 @@ export function makeChunks(parts, size) {
     }
   }
   push()
-  return chunks.map(c => ({ text: c.text.trim(), range: c.from === c.to ? c.from : `${c.from || '开头'} — ${c.to || '结尾'}` }))
+  let start = 0
+  return chunks.map(c => {
+    const text = c.text.trim()
+    const out = { text, start, range: c.from === c.to ? c.from : `${c.from || '开头'} — ${c.to || '结尾'}` }
+    start += text.length
+    return out
+  })
 }
 
 // 同一本书的文字只取一次
@@ -400,13 +408,102 @@ function finalize(people, themes, merged, fallback) {
   return map
 }
 
+// ---------- 边读边画：每一项在原文里第一次出现的位置 ----------
+// AI 一次读完一段；界面上的“阅读光标”按设定的速度扫过原文，扫到哪个人物 / 概念第一次出现的地方，就把它画上导图
+function markPositions(res, text) {
+  const low = text.toLowerCase()
+  const find = names => {
+    let best = -1
+    for (const n of names) {
+      const t = str(n).toLowerCase()
+      if (!t) continue
+      const i = low.indexOf(t)
+      if (i >= 0 && (best < 0 || i < best)) best = i
+    }
+    return best
+  }
+  const spread = (k, n) => Math.round(text.length * (k + 1) / (n + 1))
+  const place = (list, names) => {
+    list = arr(list)
+    list.forEach((x, k) => {
+      if (!x || typeof x !== 'object') return
+      const at = names ? find(names(x)) : -1
+      x._at = at >= 0 ? at : spread(k, list.length)
+    })
+  }
+  place(res.characters, c => [c.name, ...arr(c.aliases)])
+  place(res.concepts, c => [c.name, c.original])
+  place(res.places, p => [p.name, p.original])
+  place(res.events)
+  // 关系：两个人都出场之后
+  const at = new Map()
+  for (const c of arr(res.characters)) for (const n of [c.name, ...arr(c.aliases)]) if (c && !at.has(keyOf(n))) at.set(keyOf(n), c._at)
+  arr(res.relations).forEach((r, k, list) => {
+    if (!r || typeof r !== 'object') return
+    const a = at.get(keyOf(r.from)), b = at.get(keyOf(r.to))
+    r._at = a != null && b != null ? Math.max(a, b) + 1 : spread(k, list.length)
+  })
+  return res
+}
+
+const KINDS = ['characters', 'concepts', 'places', 'events', 'relations']
+function visibleResults(chunks, results, cursor) {
+  return results.map((r, i) => {
+    if (!r) return null
+    const c = chunks[i]
+    if (cursor >= c.start + c.text.length) return r
+    if (cursor <= c.start) return null
+    const at = cursor - c.start
+    const out = {}
+    for (const k of KINDS) out[k] = arr(r[k]).filter(x => (x?._at ?? 0) <= at)
+    return out
+  })
+}
+// 光标从 a 移到 b 之间新“读到”的条目，给“刚刚记下”列表用
+const FEED_KINDS = [['characters', '人物'], ['concepts', '概念'], ['places', '地点'], ['events', '情节'], ['relations', '关系']]
+function newlyRead(chunks, results, a, b) {
+  const out = []
+  results.forEach((r, i) => {
+    if (!r) return
+    const c = chunks[i]
+    if (c.start > b || c.start + c.text.length < a) return
+    for (const [k, kind] of FEED_KINDS) {
+      for (const x of arr(r[k])) {
+        const p = c.start + (x?._at ?? 0)
+        if (p > a && p <= b) {
+          out.push({
+            p, kind,
+            name: k === 'relations' ? `${str(x.from)} — ${str(x.to)}` : str(x.name || x.title),
+            desc: k === 'relations' ? str(x.type) : str(x.desc),
+          })
+        }
+      }
+    }
+  })
+  return out.sort((x, y) => x.p - y.p)
+}
+
+// ---------- 阅读速度（字 / 分钟），全局记住 ----------
+export const SPEEDS = [
+  { v: 2000, label: '2千' }, { v: 5000, label: '5千' }, { v: 10000, label: '1万' }, { v: 30000, label: '3万' }, { v: Infinity, label: '不限' },
+]
+let speedPref = 10000
+try { const v = localStorage.getItem('mm-speed'); if (v) speedPref = v === 'max' ? Infinity : +v || speedPref } catch {}
+export const getSpeed = () => speedPref
+
 // ---------- 任务管理 ----------
-const jobs = new Map() // bookId -> { state, listeners:Set, ctrl }
+const jobs = new Map() // bookId -> { state, listeners:Set, ctrl, paused, skip }
 
 const emit = job => { for (const fn of job.listeners) fn(job.state) }
 const getOrMake = bookId => {
-  if (!jobs.has(bookId)) jobs.set(bookId, { state: null, listeners: new Set(), ctrl: null })
+  if (!jobs.has(bookId)) jobs.set(bookId, { state: null, listeners: new Set(), ctrl: null, paused: false, skip: false })
   return jobs.get(bookId)
+}
+
+export function setSpeed(v) {
+  speedPref = v
+  try { localStorage.setItem('mm-speed', v === Infinity ? 'max' : String(v)) } catch {}
+  for (const job of jobs.values()) if (job.state) { job.state = { ...job.state, speed: v }; emit(job) }
 }
 
 export function subscribe(bookId, fn) {
@@ -416,9 +513,28 @@ export function subscribe(bookId, fn) {
   return () => job.listeners.delete(fn)
 }
 export const jobState = bookId => jobs.get(bookId)?.state || null
-export const isRunning = bookId => !!jobs.get(bookId)?.ctrl
+export const isActive = st => !!st && ['reading', 'extracting', 'merging', 'playing'].includes(st.phase)
 
 export function cancel(bookId) { jobs.get(bookId)?.ctrl?.abort() }
+export function setPaused(bookId, paused) {
+  const job = jobs.get(bookId)
+  if (!job?.state) return
+  job.paused = paused
+  job.state = { ...job.state, paused }
+  emit(job)
+}
+// 不看过程了：光标直接跳到 AI 已读到的位置，之后也不再等
+export function skipAhead(bookId) {
+  const job = jobs.get(bookId)
+  if (!job?.state) return
+  job.skip = true
+  job.paused = false
+  job.state = { ...job.state, skip: true, paused: false }
+  emit(job)
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms))
+const EMPTY_MAP = { summary: '', genre: '', themes: [], groups: [], characters: [], relations: [], conceptCategories: [], places: [], timeline: [] }
 
 // opts: { detail: 'fast'|'normal'|'fine', fresh: 是否丢弃已有的分段结果, model: 显示用 }
 export async function generate(record, { detail = 'normal', fresh = false, model = '' } = {}) {
@@ -426,53 +542,115 @@ export async function generate(record, { detail = 'normal', fresh = false, model
   if (job.ctrl) return
   const ctrl = new AbortController()
   job.ctrl = ctrl
+  job.paused = false
+  job.skip = false
   const set = patch => { job.state = { ...job.state, ...patch }; emit(job) }
-  set({ phase: 'reading', done: 0, total: 0, error: null, message: '正在读取全书文字…' })
+  set({
+    phase: 'reading', done: 0, total: 0, error: null, message: '正在读取全书文字…', liveMap: null, feed: [], cursor: 0, frontier: 0,
+    totalLen: 0, chunks: null, paused: false, skip: false, waiting: false, speed: speedPref, bookId: record.id,
+  })
 
   let doc = fresh ? null : await window.api.getMindMap(record.id)
+  let timer = null
+  let cursor = 0
   try {
     const { parts, total } = await bookText(record)
     if (total < 200) throw new Error(record.format === 'pdf' ? '这本 PDF 取不到文字。扫描版请先打开阅读，等文字识别完成后再生成。' : '这本书里取不到文字。')
     const size = DETAIL[detail]?.chunk || DETAIL.normal.chunk
-    const chunks = makeChunks(parts, size)
+    const chunks = makeChunks(parts, size, Math.min(size, FIRST_CHUNK))
+    const totalLen = chunks.reduce((n, c) => n + c.text.length, 0)
     if (!doc || doc.version !== VERSION || doc.detail !== detail || doc.chunkCount !== chunks.length) {
-      doc = { version: VERSION, bookId: record.id, title: record.title, detail, chunkCount: chunks.length, chars: total, chunks: {}, map: null, status: 'partial', createdAt: Date.now() }
+      doc = { version: VERSION, bookId: record.id, title: record.title, detail, chunkCount: chunks.length, chars: total, chunks: {}, map: null, status: 'partial', cursor: 0, createdAt: Date.now() }
     }
     doc.ranges = chunks.map(c => c.range)
     doc.model = model
     const results = () => chunks.map((_, i) => doc.chunks[i] || null)
-    const save = () => { doc.updatedAt = Date.now(); return window.api.setMindMap(record.id, doc) }
+    const save = () => { doc.updatedAt = Date.now(); return window.api.setMindMap(record.id, { ...doc }) }
     const doneCount = () => Object.keys(doc.chunks).length
-    set({ phase: 'extracting', done: doneCount(), total: chunks.length, message: '', doc })
+    for (const [i, r] of Object.entries(doc.chunks)) if (chunks[i]) markPositions(r, chunks[i].text)
 
-    // 逐段抽取（并行），每完成一段就更新预览并保存
+    // AI 已经连续读完的位置：光标不能超过它
+    const frontier = () => {
+      for (let i = 0; i < chunks.length; i++) if (!doc.chunks[i]) return chunks[i].start
+      return totalLen
+    }
+    const chunkAt = p => { let i = 0; while (i < chunks.length - 1 && chunks[i + 1].start <= p) i++; return i }
+    // 上次读到哪里就接着往下读（已经读过的部分直接画出来）
+    cursor = Math.min(doc.status === 'done' ? 0 : doc.cursor || 0, frontier())
+    let revealed = -1
+    let feed = []
+    const reveal = (from, to) => {
+      const vis = visibleResults(chunks, results(), to)
+      const count = vis.reduce((n, r) => n + (r ? KINDS.reduce((m, k) => m + arr(r[k]).length, 0) : 0), 0)
+      if (to > from) feed = [...feed, ...newlyRead(chunks, results(), from, to)].slice(-40)
+      if (count === revealed) return null
+      revealed = count
+      return localMap(mergeChunks(vis), doc.ranges)
+    }
+    const watching = () => job.listeners.size > 0
+    const unlimited = () => !watching() || job.skip || speedPref === Infinity
+
+    set({ phase: 'extracting', done: doneCount(), total: chunks.length, message: '', chunks, totalLen, cursor, frontier: frontier(), liveMap: reveal(0, cursor) || EMPTY_MAP, feed })
+
+    // 阅读光标：每 100ms 按设定速度前进，不超过 AI 已读完的位置
+    let last = performance.now()
+    let lastSave = 0
+    timer = setInterval(() => {
+      const now = performance.now()
+      const dt = Math.min(1, (now - last) / 1000)
+      last = now
+      const fr = frontier()
+      const prev = cursor
+      if (unlimited()) cursor = fr
+      else if (!job.paused) cursor = Math.min(fr, cursor + speedPref / 60 * dt)
+      const patch = {}
+      if (cursor !== prev) {
+        const map = reveal(prev, cursor)
+        if (map) patch.liveMap = map
+        patch.feed = feed
+        patch.cursor = cursor
+        if (now - lastSave > 5000) { lastSave = now; doc.cursor = cursor; save() }
+      }
+      const waiting = cursor >= fr && fr < totalLen
+      if (fr !== job.state.frontier) patch.frontier = fr
+      if (waiting !== job.state.waiting) patch.waiting = waiting
+      if (Object.keys(patch).length) set(patch)
+    }, 100)
+
+    // 逐段抽取（并行）；边看边读时 AI 不超前太多，免得白读
     const todo = chunks.map((_, i) => i).filter(i => !doc.chunks[i])
     let failures = 0, lastErr = null
+    let firstAlone = !doc.chunks[0] // 第一段单独先读（不和后面的大段抢），导图尽快出来
     const worker = async () => {
       while (todo.length) {
+        if (ctrl.signal.aborted) throw new Cancelled()
+        if (firstAlone && todo[0] !== 0) { await sleep(300); continue }
+        if (!unlimited() && todo[0] > chunkAt(cursor) + LOOKAHEAD) { await sleep(300); continue }
         const i = todo.shift()
         let res = null
         for (let attempt = 0; attempt < 2 && !res; attempt++) {
           try { res = parseJSON(await callAI(SYSTEM, chunkPrompt(record, chunks[i], i, chunks.length), ctrl.signal)) }
           catch (e) { if (e instanceof Cancelled) throw e; lastErr = e }
         }
+        if (i === 0) firstAlone = false
         if (!res) {
           failures++
-          // 一开始就连续失败（多半是 AI 没配好或额度用完）：不再继续浪费时间
-          if (!doneCount() && failures >= 2) throw lastErr
-          continue
+          if (!doneCount() && failures >= 2) throw lastErr // 一开始就连续失败：多半是 AI 没配好或额度用完
+          // 读不出来的段先当作空段，光标可以继续往后走；下次“继续生成”时重读
+          res = { characters: [], relations: [], concepts: [], places: [], events: [], failed: true }
         }
-        doc.chunks[i] = res
+        doc.chunks[i] = markPositions(res, chunks[i].text)
         doc.map = localMap(mergeChunks(results()), doc.ranges)
+        doc.cursor = cursor
         await save()
-        set({ done: doneCount(), doc: { ...doc } })
+        set({ done: doneCount() })
       }
     }
     await Promise.all(Array.from({ length: Math.min(CONCURRENCY, todo.length) }, worker))
-    if (!doneCount()) throw lastErr || new Error('AI 没有返回结果')
 
-    // 整合
+    // 整合（光标继续往后读）
     set({ phase: 'merging', message: 'AI 正在整合人物关系、概念和情节脉络…' })
+    if (!results().some(r => r && !r.failed)) throw lastErr || new Error('AI 没有返回结果')
     const merged = mergeChunks(results())
     const fallback = localMap(merged, doc.ranges)
     const [people, themes] = await Promise.all([
@@ -480,18 +658,29 @@ export async function generate(record, { detail = 'normal', fresh = false, model
       callAI(SYSTEM, themesPrompt(record, merged), ctrl.signal).then(parseJSON).catch(e => { if (e instanceof Cancelled) throw e; console.warn('整合主题失败', e); return null }),
     ])
     doc.map = finalize(people, themes, merged, fallback)
-    const missing = chunks.length - doneCount()
-    doc.status = missing ? 'partial' : 'done'
+    const failed = results().map((r, i) => r?.failed ? i : -1).filter(i => i >= 0)
+    for (const i of failed) delete doc.chunks[i]
+    doc.status = failed.length ? 'partial' : 'done'
     doc.integrated = !!(people || themes)
+    doc.cursor = totalLen
     await save()
-    set({
-      phase: 'done', doc: { ...doc },
-      message: missing ? `有 ${missing} 段没能读取成功，可以点“继续生成”补上。` : !people || !themes ? 'AI 整合时出了点问题，部分内容为未整合的初稿。' : '',
-    })
+    const message = failed.length ? `有 ${failed.length} 段没能读取成功，可以点“继续生成”补上。` : !people || !themes ? 'AI 整合时出了点问题，部分内容为未整合的初稿。' : ''
+
+    // AI 读完了、光标还没读完：读完再换成整合后的导图
+    set({ phase: 'playing', message: '' })
+    while (cursor < totalLen && !ctrl.signal.aborted) await sleep(200)
+    clearInterval(timer)
+    set({ phase: 'done', doc: { ...doc }, liveMap: null, message, cursor: totalLen })
   } catch (e) {
-    if (e instanceof Cancelled || ctrl.signal.aborted) set({ phase: 'cancelled', message: '已停止，已读的部分会保留，可以继续生成。', doc: doc && { ...doc } })
-    else set({ phase: 'error', error: e?.message || String(e), doc: doc && { ...doc } })
+    clearInterval(timer)
+    if (doc?.chunkCount) {
+      if (doc.status !== 'done') doc.cursor = cursor
+      window.api.setMindMap(record.id, { ...doc, updatedAt: Date.now() })
+    }
+    if (e instanceof Cancelled || ctrl.signal.aborted) set({ phase: doc?.status === 'done' ? 'done' : 'cancelled', message: doc?.status === 'done' ? '' : '已停止，已读的部分会保留，可以继续生成。', doc: doc && { ...doc }, liveMap: null })
+    else set({ phase: 'error', error: e?.message || String(e), doc: doc && { ...doc }, liveMap: null })
   } finally {
+    clearInterval(timer)
     job.ctrl = null
     emit(job)
   }

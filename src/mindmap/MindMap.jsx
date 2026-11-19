@@ -1,13 +1,15 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   X, Network, Users, Download, RotateCcw, Search, Maximize2, Plus, Minus, Square, Sparkles, KeyRound,
-  BookOpen, ChevronsDownUp, ChevronsUpDown, FileText, Image as ImageIcon, Star, Play,
+  BookOpen, ChevronsDownUp, ChevronsUpDown, FileText, Image as ImageIcon, Star, Play, Pause, FastForward, Crosshair,
 } from 'lucide-react'
 import { useLib } from '../App.jsx'
 import { toast, openMenu, confirmDialog } from '../lib/ui.jsx'
 import { aiReady, aiLabel } from '../lib/ai.js'
 import { isAppDark } from '../reader/theme.js'
-import { DETAIL, bookText, generate, cancel, subscribe, jobState } from './generate.js'
+import {
+  DETAIL, SPEEDS, getSpeed, bookText, generate, cancel, subscribe, jobState, isActive, setPaused, setSpeed, skipAhead,
+} from './generate.js'
 import {
   buildTree, layoutTree, linkPath, findPath, layoutGraph, graphBBox, toMarkdown, palette,
   BRANCH_COLORS, GROUP_COLORS, STYLE,
@@ -17,32 +19,69 @@ const hexA = (hex, a) => {
   const n = parseInt(hex.slice(1), 16)
   return `rgba(${n >> 16},${(n >> 8) & 255},${n & 255},${a})`
 }
-const keyPath = path => path.map(n => n.label).join('/')
+const wan = n => n >= 10000 ? (n / 10000).toFixed(1) + ' 万' : Math.round(n).toLocaleString()
 
-// ---------- 平移缩放 ----------
+// ---------- 平移缩放（带平滑移动镜头） ----------
 function usePanZoom() {
   const [tf, setTfState] = useState({ x: 0, y: 0, k: 1 })
   const tfRef = useRef(tf)
   const boxRef = useRef()
+  const anim = useRef(0)
+  const userAt = useRef(0) // 用户最近一次自己拖动 / 缩放的时间：这之后几秒内镜头不自动跟随
   const setTf = t => { tfRef.current = t; setTfState(t) }
-  const fitTo = useCallback((bbox, pad = 48, maxK = 1) => {
+  const stopAnim = () => cancelAnimationFrame(anim.current)
+  const touched = () => { userAt.current = performance.now(); stopAnim() }
+  const animateTo = useCallback((to, ms = 650) => {
+    stopAnim()
+    const from = tfRef.current, t0 = performance.now()
+    const step = now => {
+      const p = Math.min(1, (now - t0) / ms), e = 1 - Math.pow(1 - p, 3)
+      setTf({ x: from.x + (to.x - from.x) * e, y: from.y + (to.y - from.y) * e, k: from.k + (to.k - from.k) * e })
+      if (p < 1) anim.current = requestAnimationFrame(step)
+    }
+    anim.current = requestAnimationFrame(step)
+  }, [])
+  const fitTf = (bbox, pad, maxK) => {
     const el = boxRef.current
-    if (!el || !bbox) return
     const W = el.clientWidth, H = el.clientHeight
     const k = Math.max(0.12, Math.min(maxK, (W - pad * 2) / bbox.w, (H - pad * 2) / bbox.h))
-    setTf({ k, x: W / 2 - (bbox.x + bbox.w / 2) * k, y: H / 2 - (bbox.y + bbox.h / 2) * k })
+    return { k, x: W / 2 - (bbox.x + bbox.w / 2) * k, y: H / 2 - (bbox.y + bbox.h / 2) * k }
+  }
+  const fitTo = useCallback((bbox, pad = 48, maxK = 1, smooth = false) => {
+    if (!boxRef.current || !bbox) return
+    const t = fitTf(bbox, pad, maxK)
+    smooth ? animateTo(t) : (stopAnim(), setTf(t))
   }, [])
   const zoomBy = useCallback((f, cx, cy) => {
     const el = boxRef.current
     const t = tfRef.current
     if (cx == null) { cx = el.clientWidth / 2; cy = el.clientHeight / 2 }
     const k = Math.max(0.12, Math.min(3, t.k * f))
+    touched()
     setTf({ k, x: cx - (cx - t.x) * k / t.k, y: cy - (cy - t.y) * k / t.k })
   }, [])
-  const centerOn = useCallback((x, y, k) => {
+  const centerOn = useCallback((x, y, k, smooth = true) => {
     const el = boxRef.current
     const kk = k ?? Math.max(tfRef.current.k, 0.8)
-    setTf({ k: kk, x: el.clientWidth / 2 - x * kk, y: el.clientHeight / 2 - y * kk })
+    const t = { k: kk, x: el.clientWidth / 2 - x * kk, y: el.clientHeight / 2 - y * kk }
+    smooth ? animateTo(t) : setTf(t)
+  }, [])
+  // 镜头跟随：新画上的节点跑出视野时，平移过去（用户刚自己动过镜头就先不跟）
+  const follow = useCallback((x, y, minK = 0.5) => {
+    const el = boxRef.current
+    if (!el || performance.now() - userAt.current < 6000) return
+    const t = tfRef.current
+    const k = Math.max(t.k, minK)
+    const W = el.clientWidth, H = el.clientHeight, m = Math.min(160, W / 4)
+    const sx = t.x + x * k, sy = t.y + y * k
+    if (k === t.k && sx > m && sx < W - m && sy > m * 0.6 && sy < H - m * 0.6) return
+    let nx = t.x, ny = t.y
+    if (k !== t.k) { nx = W / 2 - x * k; ny = H / 2 - y * k }
+    else {
+      if (sx < m) nx += m - sx + W * 0.15; else if (sx > W - m) nx -= sx - (W - m) + W * 0.15
+      if (sy < m * 0.6) ny += m * 0.6 - sy + H * 0.15; else if (sy > H - m * 0.6) ny -= sy - (H - m * 0.6) + H * 0.15
+    }
+    animateTo({ x: nx, y: ny, k })
   }, [])
   // 滚轮缩放（以鼠标为中心）；拖动空白处平移
   useEffect(() => {
@@ -52,30 +91,32 @@ function usePanZoom() {
       e.preventDefault()
       const r = el.getBoundingClientRect()
       if (e.ctrlKey || Math.abs(e.deltaY) >= Math.abs(e.deltaX)) zoomBy(Math.exp(-e.deltaY * 0.0016), e.clientX - r.left, e.clientY - r.top)
-      else { const t = tfRef.current; setTf({ ...t, x: t.x - e.deltaX }) }
+      else { touched(); const t = tfRef.current; setTf({ ...t, x: t.x - e.deltaX }) }
     }
     el.addEventListener('wheel', onWheel, { passive: false })
     return () => el.removeEventListener('wheel', onWheel)
   })
+  useEffect(() => stopAnim, [])
   const panStart = e => {
     if (e.button !== 0 || e.target.closest('[data-node], .mm-zoom, .mm-legend, button, input, label')) return
+    touched()
     const t0 = tfRef.current, x0 = e.clientX, y0 = e.clientY
     const el = e.currentTarget
     el.setPointerCapture(e.pointerId)
     el.classList.add('panning')
     const move = ev => setTf({ ...t0, x: t0.x + ev.clientX - x0, y: t0.y + ev.clientY - y0 })
-    const up = () => { el.classList.remove('panning'); el.removeEventListener('pointermove', move); el.removeEventListener('pointerup', up) }
+    const up = () => { userAt.current = performance.now(); el.classList.remove('panning'); el.removeEventListener('pointermove', move); el.removeEventListener('pointerup', up) }
     el.addEventListener('pointermove', move)
     el.addEventListener('pointerup', up)
   }
-  return { tf, tfRef, boxRef, fitTo, zoomBy, centerOn, panStart }
+  return { tf, tfRef, boxRef, userAt, fitTo, zoomBy, centerOn, follow, panStart }
 }
 
 export default function MindMap({ record, onClose, onLocate, onOpenBook }) {
   const lib = useLib()
   const ai = lib.settings.ai
   const dark = isAppDark(lib.settings.theme)
-  const C = palette(dark)
+  const C = useMemo(() => palette(dark), [dark])
   const [doc, setDoc] = useState(undefined) // undefined = 读取中；null = 还没生成过
   const [job, setJob] = useState(() => jobState(record.id))
   const [view, setView] = useState('map') // map | graph
@@ -86,7 +127,7 @@ export default function MindMap({ record, onClose, onLocate, onOpenBook }) {
   useEffect(() => {
     let alive = true
     window.api.getMindMap(record.id).then(d => { if (alive) setDoc(d || null) })
-    const off = subscribe(record.id, st => { setJob({ ...st }); if (st.doc) setDoc(st.doc) })
+    const off = subscribe(record.id, st => { setJob(st); if (st.doc) setDoc(st.doc) })
     return () => { alive = false; off() }
   }, [record.id])
   useEffect(() => { if (doc?.detail) setDetail(doc.detail) }, [doc?.detail])
@@ -98,17 +139,18 @@ export default function MindMap({ record, onClose, onLocate, onOpenBook }) {
       e.stopPropagation() // 导图盖在阅读页上面：别让方向键、快捷键去翻下面的书
       if (e.key === 'Escape') onClose()
       if ((e.ctrlKey || e.metaKey) && e.key === 'f') { e.preventDefault(); document.querySelector('.mm-search input')?.focus() }
+      if (e.key === ' ' && isActive(jobState(record.id))) { e.preventDefault(); const st = jobState(record.id); setPaused(record.id, !st.paused) }
     }
     window.addEventListener('keydown', k, true)
     return () => window.removeEventListener('keydown', k, true)
-  }, [onClose])
+  }, [onClose, record.id])
 
-  const running = !!job && ['reading', 'extracting', 'merging'].includes(job.phase)
-  const map = doc?.map
-  const start = (fresh = false) => generate(record, { detail, fresh, model: aiLabel(ai) })
+  const active = isActive(job) // 正在边读边画
+  const map = active ? job.liveMap : doc?.map
+  const ranges = active ? job.chunks?.map(c => c.range) : doc?.ranges
+  const start = (fresh = false) => { setSel(null); generate(record, { detail, fresh, model: aiLabel(ai) }) }
   const restart = async () => {
     if (!(await confirmDialog({ title: '重新生成思维导图？', message: '会让 AI 从头再读一遍全书，现有的导图会被替换。', okText: '重新生成' }))) return
-    setSel(null)
     start(true)
   }
 
@@ -160,15 +202,14 @@ export default function MindMap({ record, onClose, onLocate, onOpenBook }) {
     return null
   }, [index])
 
-  const showIntro = doc === null && !running
-  const showProgress = running && !map
+  const showIntro = !active && doc !== undefined && !doc?.map
   return (
     <div className="mindmap">
       <header className="mm-top drag">
         <button className="icon-btn" title="关闭 (Esc)" onClick={onClose}><X size={18} /></button>
         <div className="mm-title">
           <span className="t">《{record.title}》</span>
-          <span className="c">{map ? (view === 'map' ? '思维导图' : '人物关系') : '思维导图'}</span>
+          <span className="c">{active ? '边读边画' : map ? (view === 'map' ? '思维导图' : '人物关系') : '思维导图'}</span>
         </div>
         {map && (
           <div className="seg">
@@ -186,30 +227,29 @@ export default function MindMap({ record, onClose, onLocate, onOpenBook }) {
           </label>
         )}
         {onOpenBook && <button className="btn btn-sm" onClick={onOpenBook}><BookOpen size={14} />打开阅读</button>}
-        {map && <button className="btn btn-sm" onClick={exportMenu}><Download size={14} />导出</button>}
-        {map && !running && <button className="icon-btn" title="重新生成" onClick={restart}><RotateCcw size={16} /></button>}
+        {map && !active && <button className="btn btn-sm" onClick={exportMenu}><Download size={14} />导出</button>}
+        {map && !active && <button className="icon-btn" title="重新生成" onClick={restart}><RotateCcw size={16} /></button>}
       </header>
 
-      {running && map && <ProgressBar job={job} />}
-      {!running && map && job?.phase === 'error' && <div className="mm-banner err">生成中断：{job.error}<button className="btn btn-sm btn-primary" onClick={() => start()}>继续生成</button></div>}
-      {!running && map && (doc.status === 'partial' || job?.message) && job?.phase !== 'error' && (
+      {!active && map && job?.phase === 'error' && <div className="mm-banner err">生成中断：{job.error}<button className="btn btn-sm btn-primary" onClick={() => start()}>继续生成</button></div>}
+      {!active && map && (doc?.status === 'partial' || job?.message) && job?.phase !== 'error' && (
         <div className="mm-banner">
-          {job?.message || `上次只读完了 ${Object.keys(doc.chunks || {}).length}/${doc.chunkCount} 段。`}
-          {doc.status === 'partial' && <button className="btn btn-sm btn-primary" onClick={() => start()}>继续生成</button>}
+          {job?.message || `上次读到第 ${Object.keys(doc.chunks || {}).length}/${doc.chunkCount} 段就停下了。`}
+          {doc?.status === 'partial' && <button className="btn btn-sm btn-primary" onClick={() => start()}><Play size={13} />接着读</button>}
         </div>
       )}
 
       <div className="mm-body">
-        {doc === undefined && <div className="mm-center"><span className="spinner" /></div>}
-        {showIntro && <Intro record={record} ai={ai} detail={detail} setDetail={setDetail} onStart={() => start()} job={job} />}
-        {showProgress && <Progress job={job} onStop={() => cancel(record.id)} />}
-        {!running && !map && doc && <Intro record={record} ai={ai} detail={detail} setDetail={setDetail} onStart={() => start()} job={job} resume={doc} />}
+        {doc === undefined && !active && <div className="mm-center"><span className="spinner" /></div>}
+        {showIntro && <Intro record={record} ai={ai} detail={detail} setDetail={setDetail} onStart={() => start()} job={job} resume={doc} />}
+        {active && <ReadingPane job={job} bookId={record.id} />}
+        {active && !map && <div className="mm-canvas mm-empty" style={{ background: C.bg }}><span className="spinner" /></div>}
         {map && (
           <>
             {view === 'map'
-              ? <TreeView map={map} title={record.title} C={C} sel={sel} setSel={setSel} query={query} live={running} />
-              : <GraphView map={map} C={C} sel={sel} setSel={setSel} query={query} />}
-            <Detail map={map} doc={doc} sel={sel} setSel={setSel} resolve={resolve} index={index} onLocate={onLocate} record={record} />
+              ? <TreeView map={map} title={record.title} C={C} sel={sel} setSel={setSel} query={query} live={active} />
+              : <GraphView map={map} C={C} sel={sel} setSel={setSel} query={query} live={active} />}
+            {(!active || sel) && <Detail map={map} doc={doc} ranges={ranges} sel={sel} setSel={setSel} resolve={resolve} index={index} onLocate={onLocate} record={record} live={active} />}
           </>
         )}
       </div>
@@ -221,18 +261,20 @@ export default function MindMap({ record, onClose, onLocate, onOpenBook }) {
 function Intro({ record, ai, detail, setDetail, onStart, job, resume }) {
   const lib = useLib()
   const [size, setSize] = useState(null)
+  const [speed, setSp] = useState(() => jobState(record.id)?.speed)
   useEffect(() => {
     let alive = true
-    bookText(record).then(t => alive && setSize(t.total)).catch(e => alive && setSize(-1))
+    bookText(record).then(t => alive && setSize(t.total)).catch(() => alive && setSize(-1))
     return () => { alive = false }
   }, [record.id])
-  const chunks = size > 0 ? Math.max(1, Math.ceil(size / DETAIL[detail].chunk)) : 0
+  const chunks = size > 0 ? Math.max(1, Math.ceil(Math.max(0, size - 8000) / DETAIL[detail].chunk) + 1) : 0
+  const resumable = resume?.version === 2 && resume.chunkCount && Object.keys(resume.chunks || {}).length // 旧版本的分段不同，只能从头读
   return (
     <div className="mm-center">
       <div className="mm-intro">
         <div className="mm-intro-icon"><Network size={26} strokeWidth={1.8} /></div>
-        <div className="mm-intro-title">把这本书整理成思维导图</div>
-        <div className="mm-intro-msg">AI 会通读全书，梳理出书里的人物与人物关系、核心概念、主题和情节脉络，画成可以展开、缩放、导出的思维导图和人物关系图。</div>
+        <div className="mm-intro-title">边读边画思维导图</div>
+        <div className="mm-intro-msg">AI 像人一样从头读这本书：左边是正在读的原文，读到哪个人物、概念第一次出场，右边的导图就长出那个节点。读完后再整理成完整的思维导图和人物关系图。</div>
         <div className="mm-feats">
           <div><Users size={16} /><b>人物</b><span>身份、性格、经历，按阵营分组</span></div>
           <div><Network size={16} /><b>关系</b><span>谁和谁是什么关系，一张图看清</span></div>
@@ -252,16 +294,17 @@ function Intro({ record, ai, detail, setDetail, onStart, job, resume }) {
                 {Object.entries(DETAIL).map(([k, d]) => <button key={k} className={detail === k ? 'active' : ''} title={d.hint} onClick={() => setDetail(k)}>{d.label}</button>)}
               </div>
             </div>
+            <SpeedPicker value={speed} onChange={v => { setSpeed(v); setSp(v) }} />
             <div className="mm-intro-note tabular">
               {size == null ? '正在统计全书字数…'
                 : size < 0 ? '读取全书文字失败'
-                : `全书约 ${size >= 10000 ? (size / 10000).toFixed(1) + ' 万' : size} 字，分 ${chunks} 段交给 AI（${aiLabel(ai)}）阅读，最后再整合一次`}
+                : `全书约 ${wan(size)} 字，分 ${chunks} 段交给 AI（${aiLabel(ai)}）阅读，最后再整合一次`}
             </div>
             {job?.phase === 'error' && <div className="mm-intro-err">{job.error}</div>}
             <button className="btn btn-primary mm-go" onClick={onStart} disabled={size != null && size <= 0}>
-              <Sparkles size={15} />{resume ? `继续生成（已读 ${Object.keys(resume.chunks || {}).length}/${resume.chunkCount} 段）` : '开始生成'}
+              <Play size={15} fill="currentColor" />{resumable ? `接着读（已读 ${resumable}/${resume.chunkCount} 段）` : '开始阅读'}
             </button>
-            <div className="mm-intro-tip">生成过程中可以关掉这个窗口继续读书，后台会接着整理。</div>
+            <div className="mm-intro-tip">读的过程中可以随时调速、暂停；关掉窗口后台会按最快速度继续。</div>
           </>
         )}
       </div>
@@ -269,90 +312,195 @@ function Intro({ record, ai, detail, setDetail, onStart, job, resume }) {
   )
 }
 
-function phaseText(job) {
-  if (job.phase === 'reading') return job.message || '正在读取全书文字…'
-  if (job.phase === 'merging') return job.message
-  return `AI 正在阅读全书 · 第 ${Math.min(job.done + 1, job.total)} / ${job.total} 段`
-}
-
-function Progress({ job, onStop }) {
-  const pct = job.total ? job.done / job.total : 0
+function SpeedPicker({ value, onChange }) {
+  const v = value ?? getSpeed()
   return (
-    <div className="mm-center">
-      <div className="mm-intro">
-        <div className="mm-intro-icon pulse"><Sparkles size={24} strokeWidth={1.8} /></div>
-        <div className="mm-intro-title">正在整理…</div>
-        <div className="mm-intro-msg">{phaseText(job)}</div>
-        <div className="mm-prog"><i style={{ width: `${Math.max(4, pct * 100)}%` }} /></div>
-        <div className="mm-intro-tip">读完第一段就能先看到导图，后面会边读边补充。可以关掉窗口，后台会继续。</div>
-        <button className="btn" onClick={onStop}><Square size={11} fill="currentColor" />停止</button>
+    <div className="mm-detail-row">
+      <span className="form-label">阅读速度</span>
+      <div className="seg">
+        {SPEEDS.map(s => <button key={s.label} className={v === s.v ? 'active' : ''} title={s.v === Infinity ? 'AI 读完一段就立刻画出来' : `每分钟 ${s.v} 字`} onClick={() => onChange(s.v)}>{s.label}</button>)}
       </div>
+      <span className="muted">字/分</span>
     </div>
   )
 }
 
-function ProgressBar({ job }) {
-  const pct = job.phase === 'merging' ? 1 : job.total ? job.done / job.total : 0
+// ---------- 阅读窗格：正在读的原文 + 速度 + 刚记下的内容 ----------
+const SENT_END = /[。！？!?；;\n]|\.(\s|$)/g
+function splitMarkers(text) {
+  return text.split(/(【[^】\n]{1,60}】)/).map((t, i) => i % 2 ? <span key={i} className="rd-ch">{t.slice(1, -1)}</span> : t)
+}
+
+function ReadingPane({ job, bookId }) {
+  const textRef = useRef()
+  const curRef = useRef()
+  const hist = useRef([])
+  const { chunks, cursor = 0, totalLen = 0, frontier = 0, waiting, paused, speed, feed = [], phase, done = 0, total = 0 } = job
+  // 实际读速：最近 8 秒光标走了多少字
+  const now = performance.now()
+  const h = hist.current
+  if (!h.length || h.at(-1).c !== cursor || now - h.at(-1).t > 500) h.push({ t: now, c: cursor })
+  while (h.length > 2 && now - h[0].t > 8000) h.shift()
+  const rate = h.length > 1 && h.at(-1).t > h[0].t ? (h.at(-1).c - h[0].c) / (h.at(-1).t - h[0].t) * 60000 : 0
+
+  let ci = 0
+  if (chunks) while (ci < chunks.length - 1 && chunks[ci + 1].start <= cursor) ci++
+  const chunk = chunks?.[ci]
+  const local = chunk ? Math.min(chunk.text.length, cursor - chunk.start) : 0
+  let view = null, chapter = ''
+  if (chunk) {
+    const t = chunk.text
+    // 当前句：光标前最后一个句号之后，到光标后第一个句号
+    let s0 = 0
+    SENT_END.lastIndex = 0
+    for (let m; (m = SENT_END.exec(t)) && m.index < local;) s0 = m.index + m[0].length
+    SENT_END.lastIndex = Math.max(local, s0)
+    const m2 = SENT_END.exec(t)
+    const s1 = m2 ? m2.index + m2[0].length : t.length
+    const a = Math.max(0, s0 - 900), b = Math.min(t.length, s1 + 1400)
+    const before = t.slice(a, s0), cur = t.slice(s0, s1)
+    // 句子里已读 / 未读两半
+    const split = Math.max(0, Math.min(cur.length, local - s0))
+    view = { before, curRead: cur.slice(0, split), curRest: cur.slice(split), after: t.slice(s1, b), head: a > 0, s0 }
+    const mk = t.lastIndexOf('【', local)
+    const mkEnd = mk >= 0 ? t.indexOf('】', mk) : -1
+    chapter = mk >= 0 && mkEnd > mk ? t.slice(mk + 1, mkEnd) : chunk.range
+  }
+  useLayoutEffect(() => {
+    const box = textRef.current, el = curRef.current
+    if (!box || !el) return
+    const target = el.offsetTop - box.clientHeight * 0.38
+    if (Math.abs(box.scrollTop - target) > 4) box.scrollTo({ top: target, behavior: Math.abs(box.scrollTop - target) > box.clientHeight ? 'auto' : 'smooth' })
+  }, [view?.s0, ci])
+
+  const atEnd = totalLen > 0 && cursor >= totalLen
+  const status = phase === 'reading' ? '正在打开这本书…'
+    : atEnd ? '全书读完了，AI 正在整合人物关系、概念和情节脉络…'
+    : paused ? '已暂停'
+    : waiting ? 'AI 正在读这一段，马上就好…'
+    : phase === 'merging' ? 'AI 读完了全书，正在整合；你可以接着往下看'
+    : phase === 'playing' ? 'AI 已整理完毕，读完就出完整导图'
+    : speed === Infinity ? 'AI 读完一段就画一段'
+    : '正在读'
+  const pct = totalLen ? cursor / totalLen : 0
+  const aiPct = totalLen ? frontier / totalLen : 0
   return (
-    <div className="mm-banner live">
-      <span className="spinner sm" />{phaseText(job)}
-      <div className="mm-prog small"><i style={{ width: `${Math.max(3, pct * 100)}%` }} /></div>
-      <button className="btn btn-sm" onClick={() => cancel(job.doc?.bookId)}><Square size={10} fill="currentColor" />停止</button>
-    </div>
+    <aside className="mm-reading">
+      <div className="rd-head">
+        <span className={`rd-dot ${paused ? 'paused' : waiting ? 'wait' : ''}`} />
+        <span className="rd-status">{status}</span>
+      </div>
+      {chapter && <div className="rd-chapter">{chapter}</div>}
+      <div className={`rd-text ${waiting ? 'waiting' : ''}`} ref={textRef}>
+        {!view && <div className="rd-loading"><span className="spinner" /></div>}
+        {view && (
+          <>
+            {view.head && <span className="rd-ell">…</span>}
+            <span className="rd-read">{splitMarkers(view.before)}</span>
+            <span className="rd-cur" ref={curRef}><span className="rd-cur-read">{splitMarkers(view.curRead)}</span><i className="rd-caret" />{splitMarkers(view.curRest)}</span>
+            <span className="rd-unread">{splitMarkers(view.after)}</span>
+          </>
+        )}
+      </div>
+      <div className="rd-bar" title={`阅读位置 ${Math.round(pct * 100)}%，AI 已读到 ${Math.round(aiPct * 100)}%`}>
+        <i className="ai" style={{ width: `${aiPct * 100}%` }} />
+        <i className="me" style={{ width: `${pct * 100}%` }} />
+      </div>
+      <div className="rd-stats tabular">
+        <div><b>{wan(cursor)}</b><span>/ {wan(totalLen)} 字</span></div>
+        <div><b>{paused || waiting || atEnd ? '—' : speed === Infinity || job.skip ? '不限' : wan(Math.min(rate, speed * 1.2))}</b><span>字/分</span></div>
+        <div><b>{done}/{total || '?'}</b><span>AI 已读段</span></div>
+      </div>
+      <div className="rd-ctrl">
+        <div className="seg small">
+          {SPEEDS.map(s => <button key={s.label} className={speed === s.v ? 'active' : ''} title={s.v === Infinity ? 'AI 读完一段就立刻画出来' : `每分钟 ${s.v} 字`} onClick={() => setSpeed(s.v)}>{s.label}</button>)}
+        </div>
+        <button className="icon-btn" title={paused ? '继续（空格）' : '暂停（空格）'} onClick={() => setPaused(bookId, !paused)}>{paused ? <Play size={15} fill="currentColor" /> : <Pause size={15} fill="currentColor" />}</button>
+        <button className="icon-btn" title="不看过程，直接跳到 AI 已读到的地方" onClick={() => skipAhead(bookId)}><FastForward size={15} fill="currentColor" /></button>
+        <button className="icon-btn" title="停止（已读的部分会保留）" onClick={() => cancel(bookId)}><Square size={13} fill="currentColor" /></button>
+      </div>
+      <div className="rd-feed-t">刚刚记下</div>
+      <div className="rd-feed">
+        {!feed.length && <div className="muted rd-feed-empty">读到的人物、概念、情节会出现在这里</div>}
+        {feed.slice(-6).reverse().map(f => (
+          <div key={f.p + f.kind + f.name} className="rd-item">
+            <span className={`rd-kind k-${f.kind}`}>{f.kind}</span>
+            <b>{f.name}</b>
+            {f.desc && <span className="rd-desc">{f.desc}</span>}
+          </div>
+        ))}
+      </div>
+    </aside>
   )
 }
 
 // ---------- 思维导图 ----------
 const sameRef = (a, b) => !!a && !!b && a.kind === b.kind && (a.kind === 'event' ? a.index === b.index : a.name === b.name)
 
-function TreeView({ map, title, C, sel, setSel, query, live }) {
+const TreeView = memo(function TreeView({ map, title, C, sel, setSel, query, live }) {
   const pz = usePanZoom()
-  const overrides = useRef(new Map()) // 用户手动展开 / 折叠过的节点（按路径记住，导图更新后保留）
+  const overrides = useRef(new Map()) // 用户手动展开 / 折叠过的节点（按 key 记住，导图更新后保留）
+  const sides = useRef(new Map()) // 一级分支在左还是右（固定下来，长新分支时不左右乱跳）
   const [ver, setVer] = useState(0)
   const root = useMemo(() => {
     const r = buildTree(map, title)
-    const apply = (n, path) => {
-      const k = keyPath([...path, n])
-      if (overrides.current.has(k)) n.collapsed = overrides.current.get(k)
-      n.children.forEach(c => apply(c, [...path, n]))
+    const apply = n => {
+      if (overrides.current.has(n.key)) n.collapsed = overrides.current.get(n.key)
+      n.children.forEach(apply)
     }
-    apply(r, [])
+    apply(r)
     return r
   }, [map, title, ver])
-  const lay = useMemo(() => layoutTree(root), [root])
-  // 第一次显示、以及边读边补充结束时，调整视野；整张图太大时不缩得太小，以书名为中心
+  const lay = useMemo(() => layoutTree(root, sides.current), [root])
+  const layRef = useRef(lay)
+  layRef.current = lay
+
+  // 新长出来的节点：弹出动画；边读边画时镜头跟过去
+  const seen = useRef(null)
+  const fresh = useMemo(() => {
+    const prev = seen.current
+    const out = new Set()
+    if (prev) for (const n of lay.nodes) if (!prev.has(n.key)) out.add(n.key)
+    seen.current = new Set(lay.nodes.map(n => n.key))
+    return out
+  }, [lay])
+
+  // 第一次显示、以及读完换成整合后的导图时，调整视野；整张图太大时不缩得太小，以书名为中心
   const fitted = useRef(false)
   const wasLive = useRef(live)
-  const autoFit = () => {
+  const autoFit = (smooth = false) => {
     const el = pz.boxRef.current, b = layRef.current.bbox
     if (!el) return
     const k = Math.min(1, (el.clientWidth - 80) / b.w, (el.clientHeight - 80) / b.h)
-    if (k >= 0.5) pz.fitTo(b, 40, 1)
-    else pz.centerOn(0, 0, 0.5)
+    if (k >= 0.5) pz.fitTo(b, 40, 1, smooth)
+    else pz.centerOn(0, 0, 0.5, smooth)
   }
   useLayoutEffect(() => {
-    if ((!fitted.current || (wasLive.current && !live)) && lay.nodes.length) { autoFit(); fitted.current = true }
+    if (!lay.nodes.length) return
+    if (!fitted.current || (wasLive.current && !live)) { autoFit(fitted.current); fitted.current = true }
+    else if (live && fresh.size) {
+      // 跟随最新、最深的一个新节点
+      let target = null
+      for (const n of lay.nodes) if (fresh.has(n.key) && (!target || n.level >= target.level)) target = n
+      if (target) pz.follow(target.cx, target.cy)
+    }
     wasLive.current = live
   }, [lay, live])
 
   const toggle = (n, value) => {
-    const path = findPath(root, x => x === n)
-    overrides.current.set(keyPath(path), value ?? !n.collapsed)
+    overrides.current.set(n.key, value ?? !n.collapsed)
     setVer(v => v + 1)
   }
   const setAll = collapsed => {
-    const walk = (n, path) => {
-      const p = [...path, n]
-      if (n.children.length && n.level >= 1) overrides.current.set(keyPath(p), collapsed && n.level >= 2)
-      n.children.forEach(c => walk(c, p))
+    const walk = n => {
+      if (n.children.length && n.level >= 1) overrides.current.set(n.key, collapsed && n.level >= 2)
+      n.children.forEach(walk)
     }
-    walk(root, [])
+    walk(root)
     setVer(v => v + 1)
     setTimeout(() => fitNow(), 0)
   }
-  const layRef = useRef(lay)
-  layRef.current = lay
-  const fitNow = () => pz.fitTo(layRef.current.bbox, 40, 1)
+  const fitNow = () => pz.fitTo(layRef.current.bbox, 40, 1, true)
 
   // 查找：高亮匹配；回车跳到下一个（必要时展开祖先）
   const q = query.trim().toLowerCase()
@@ -372,12 +520,12 @@ function TreeView({ map, title, C, sel, setSel, query, live }) {
       hit.current = (hit.current + 1) % matches.length
       const path = matches[hit.current]
       let changed = false
-      for (const a of path.slice(0, -1)) if (a.collapsed) { overrides.current.set(keyPath(path.slice(0, path.indexOf(a) + 1)), false); changed = true }
+      for (const a of path.slice(0, -1)) if (a.collapsed) { overrides.current.set(a.key, false); changed = true }
       const target = path.at(-1)
       if (target.ref) setSel(target.ref)
       if (changed) setVer(v => v + 1)
       setTimeout(() => {
-        const n = layRef.current.nodes.find(x => keyPath(findPath(root, y => y === x) || []) === keyPath(path)) || layRef.current.nodes.find(x => x.label === target.label)
+        const n = layRef.current.nodes.find(x => x.key === target.key)
         if (n) pz.centerOn(n.cx, n.cy)
       }, 0)
     }
@@ -391,10 +539,14 @@ function TreeView({ map, title, C, sel, setSel, query, live }) {
     <div className="mm-canvas" ref={pz.boxRef} onPointerDown={pz.panStart} style={{ background: C.bg }}>
       <svg className="mm-svg" width="100%" height="100%">
         <g transform={`translate(${tf.x},${tf.y}) scale(${tf.k})`} data-bbox={JSON.stringify(lay.bbox)}>
-          {lay.links.map(l => (
-            <path key={l.to.id} d={linkPath(l.from, l.to)} fill="none" stroke={colorOf(l.to)} strokeOpacity={l.to.level === 1 ? 0.9 : 0.55}
-              strokeWidth={l.to.level === 1 ? 3 : l.to.level === 2 ? 2 : 1.5} strokeLinecap="round" />
-          ))}
+          {lay.links.map(l => {
+            const d = linkPath(l.from, l.to)
+            return (
+              <path key={l.to.key} className={`mm-edge ${fresh.has(l.to.key) ? 'mm-draw' : ''}`} d={d} style={{ d: `path("${d}")` }} pathLength={1}
+                fill="none" stroke={colorOf(l.to)} strokeOpacity={l.to.level === 1 ? 0.9 : 0.55}
+                strokeWidth={l.to.level === 1 ? 3 : l.to.level === 2 ? 2 : 1.5} strokeLinecap="round" />
+            )
+          })}
           {lay.nodes.map(n => {
             const st = STYLE[Math.min(n.level, 3)]
             const col = colorOf(n)
@@ -405,24 +557,28 @@ function TreeView({ map, title, C, sel, setSel, query, live }) {
             else if (n.level === 1) { fill = col; fg = '#ffffff'; sub = 'rgba(255,255,255,0.8)' }
             else if (n.level === 2) { fill = hexA(col, dark(C) ? 0.24 : 0.12); fg = C.text; sub = C.text2 }
             else { fill = C.panel; stroke = hexA(col, 0.45); fg = C.text; sub = C.text2 }
-            const x = n.cx - n.w / 2, y = n.cy - n.h / 2
-            const textY = n.subText ? n.cy - (st.subSize + 5) / 2 + st.size * 0.36 : n.cy + st.size * 0.36
+            // 以节点中心为原点画，整体用 transform 定位：位置变化时能平滑移动过去
+            const x = -n.w / 2, y = -n.h / 2
+            const textY = n.subText ? -(st.subSize + 5) / 2 + st.size * 0.36 : st.size * 0.36
             const hasKids = n.children.length > 0
             return (
-              <g key={n.id} data-node className="mm-node" onClick={() => n.ref && setSel(n.ref.kind === 'branch' ? null : n.ref)} onDoubleClick={() => hasKids && n.level > 0 && toggle(n)}>
-                {(selected || match) && <rect x={x - 4} y={y - 4} width={n.w + 8} height={n.h + 8} rx={n.h / 2 + 4 > 16 ? 16 : n.h / 2 + 4} fill="none" stroke={selected ? col : C.match} strokeWidth={2.5} />}
-                <rect x={x} y={y} width={n.w} height={n.h} rx={n.level <= 1 ? Math.min(n.h / 2, 20) : 9} fill={fill} stroke={stroke} strokeWidth={stroke ? 1 : 0} />
-                {n.star && <path d={starPath(x + st.padX + 6, textY - st.size * 0.36, 5.5)} fill={n.level === 1 ? '#fff' : '#ffb800'} />}
-                <text x={x + st.padX + (n.star ? 16 : 0)} y={textY} fontSize={st.size} fontWeight={st.weight} fill={fg}>{n.text}</text>
-                {n.subText && <text x={x + st.padX} y={textY + st.subSize + 5} fontSize={st.subSize} fill={sub}>{n.subText}</text>}
-                {hasKids && n.level > 0 && (
-                  <g className="mm-fold" onClick={e => { e.stopPropagation(); toggle(n) }} transform={`translate(${n.cx + n.side * (n.w / 2 + 9)},${n.cy})`}>
-                    <circle r={n.collapsed ? 9 : 6.5} fill={n.collapsed ? col : C.panel} stroke={col} strokeWidth={1.5} />
-                    {n.collapsed
-                      ? <text y={3.5} textAnchor="middle" fontSize={9.5} fontWeight={700} fill="#fff">{countAll(n)}</text>
-                      : <path d="M-3,0 H3" stroke={col} strokeWidth={1.6} strokeLinecap="round" />}
-                  </g>
-                )}
+              <g key={n.key} data-node className="mm-node" transform={`translate(${n.cx},${n.cy})`} style={{ transform: `translate(${n.cx}px, ${n.cy}px)` }}
+                onClick={() => n.ref && setSel(n.ref.kind === 'branch' ? null : n.ref)} onDoubleClick={() => hasKids && n.level > 0 && toggle(n)}>
+                <g className={fresh.has(n.key) ? 'mm-pop' : undefined}>
+                  {(selected || match) && <rect x={x - 4} y={y - 4} width={n.w + 8} height={n.h + 8} rx={n.h / 2 + 4 > 16 ? 16 : n.h / 2 + 4} fill="none" stroke={selected ? col : C.match} strokeWidth={2.5} />}
+                  <rect x={x} y={y} width={n.w} height={n.h} rx={n.level <= 1 ? Math.min(n.h / 2, 20) : 9} fill={fill} stroke={stroke} strokeWidth={stroke ? 1 : 0} />
+                  {n.star && <path d={starPath(x + st.padX + 6, textY - st.size * 0.36, 5.5)} fill={n.level === 1 ? '#fff' : '#ffb800'} />}
+                  <text x={x + st.padX + (n.star ? 16 : 0)} y={textY} fontSize={st.size} fontWeight={st.weight} fill={fg}>{n.text}</text>
+                  {n.subText && <text x={x + st.padX} y={textY + st.subSize + 5} fontSize={st.subSize} fill={sub}>{n.subText}</text>}
+                  {hasKids && n.level > 0 && (
+                    <g className="mm-fold" onClick={e => { e.stopPropagation(); toggle(n) }} transform={`translate(${n.side * (n.w / 2 + 9)},0)`}>
+                      <circle r={n.collapsed ? 9 : 6.5} fill={n.collapsed ? col : C.panel} stroke={col} strokeWidth={1.5} />
+                      {n.collapsed
+                        ? <text y={3.5} textAnchor="middle" fontSize={9.5} fontWeight={700} fill="#fff">{countAll(n)}</text>
+                        : <path d="M-3,0 H3" stroke={col} strokeWidth={1.6} strokeLinecap="round" />}
+                    </g>
+                  )}
+                </g>
               </g>
             )
           })}
@@ -431,11 +587,12 @@ function TreeView({ map, title, C, sel, setSel, query, live }) {
       <Zoom pz={pz} onFit={fitNow} extra={<>
         <button className="icon-btn" title="全部展开" onClick={() => setAll(false)}><ChevronsUpDown size={15} /></button>
         <button className="icon-btn" title="收起到第二层" onClick={() => setAll(true)}><ChevronsDownUp size={15} /></button>
+        {live && <button className="icon-btn" title="镜头跟随最新的节点" onClick={() => { pz.userAt.current = 0; const n = lay.nodes.at(-1); if (n) pz.centerOn(n.cx, n.cy, Math.max(pz.tfRef.current.k, 0.6)) }}><Crosshair size={15} /></button>}
       </>} />
-      <div className="mm-hint">滚轮缩放 · 拖动平移 · 点圆点或双击展开 / 收起{live ? ' · 正在边读边补充' : ''}</div>
+      <div className="mm-hint">滚轮缩放 · 拖动平移 · 点圆点或双击展开 / 收起{live ? ' · 镜头会跟着新节点走，拖动后暂停跟随几秒' : ''}</div>
     </div>
   )
-}
+})
 const dark = C => C.bg === '#111113'
 const countAll = n => n.children.reduce((s, c) => s + 1 + countAll(c), 0)
 function starPath(cx, cy, r) {
@@ -461,10 +618,11 @@ function Zoom({ pz, onFit, extra }) {
 }
 
 // ---------- 人物关系图 ----------
-function GraphView({ map, C, sel, setSel, query }) {
+const GraphView = memo(function GraphView({ map, C, sel, setSel, query, live }) {
   const pz = usePanZoom()
   const [minor, setMinor] = useState(true)
   const [hover, setHover] = useState(null)
+  const [dragging, setDragging] = useState(false)
   const posRef = useRef({})
   const [, force] = useState(0)
   const chars = useMemo(() => (map.characters || []).filter(c => minor || c.role !== '次要'), [map, minor])
@@ -473,14 +631,22 @@ function GraphView({ map, C, sel, setSel, query }) {
     return list.filter(g => chars.some(c => c.group === g))
   }, [map, chars])
   const groupColor = g => GROUP_COLORS[Math.max(0, groups.indexOf(g)) % GROUP_COLORS.length]
+  const seen = useRef(null)
   const graph = useMemo(() => {
     const g = layoutGraph(chars, map.relations || [], posRef.current)
     for (const n of g.nodes) posRef.current[n.id] = { x: n.x, y: n.y }
+    const prev = seen.current
+    g.fresh = new Set(prev ? g.nodes.filter(n => !prev.has(n.id)).map(n => n.id) : [])
+    seen.current = new Set(g.nodes.map(n => n.id))
     return g
   }, [chars, map.relations])
   const bbox = useMemo(() => graphBBox(graph.nodes), [graph])
   const fitted = useRef(false)
-  useLayoutEffect(() => { if (!fitted.current && graph.nodes.length) { pz.fitTo(bbox, 50, 1.2); fitted.current = true } }, [graph])
+  useLayoutEffect(() => {
+    if (!graph.nodes.length) return
+    if (!fitted.current) { pz.fitTo(bbox, 50, 1.2); fitted.current = true }
+    else if (live && graph.fresh.size && performance.now() - pz.userAt.current > 6000) pz.fitTo(bbox, 50, 1.2, true) // 边读边画：整张关系网保持在视野里
+  }, [graph])
 
   const focus = hover || (sel?.kind === 'character' ? sel.name : null)
   const nb = useMemo(() => {
@@ -512,13 +678,15 @@ function GraphView({ map, C, sel, setSel, query }) {
     const x0 = e.clientX, y0 = e.clientY, nx = n.x, ny = n.y
     let moved = false
     const move = ev => {
-      if (Math.abs(ev.clientX - x0) + Math.abs(ev.clientY - y0) > 3) moved = true
+      if (!moved && Math.abs(ev.clientX - x0) + Math.abs(ev.clientY - y0) > 3) { moved = true; setDragging(true); pz.userAt.current = performance.now() }
+      if (!moved) return
       n.x = nx + (ev.clientX - x0) / k; n.y = ny + (ev.clientY - y0) / k
       posRef.current[n.id] = { x: n.x, y: n.y }
       force(v => v + 1)
     }
     const up = () => {
       el.removeEventListener('pointermove', move); el.removeEventListener('pointerup', up)
+      setDragging(false)
       if (!moved) setSel({ kind: 'character', name: n.id })
     }
     el.addEventListener('pointermove', move)
@@ -528,21 +696,23 @@ function GraphView({ map, C, sel, setSel, query }) {
   const showAllLabels = graph.edges.length <= 36
   const { tf } = pz
   return (
-    <div className="mm-canvas" ref={pz.boxRef} onPointerDown={pz.panStart} style={{ background: C.bg }}>
+    <div className={`mm-canvas ${dragging ? 'dragging' : ''}`} ref={pz.boxRef} onPointerDown={pz.panStart} style={{ background: C.bg }}>
       <svg className="mm-svg" width="100%" height="100%">
         <g transform={`translate(${tf.x},${tf.y}) scale(${tf.k})`} data-bbox={JSON.stringify(bbox)}>
-          {graph.edges.map((e, i) => {
+          {graph.edges.map(e => {
             const a = graph.nodes[e.s], b = graph.nodes[e.t]
             const on = nb && nb.has(a.id) && nb.has(b.id) && (a.id === focus || b.id === focus)
             const op = nb ? (on ? 1 : C.dim) : 1
             const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2
             const label = e.rel.type
             const lw = label.length * 11 + 10
+            const d = `M${a.x},${a.y} L${b.x},${b.y}`
+            const isNew = graph.fresh.has(a.id) || graph.fresh.has(b.id)
             return (
-              <g key={i} opacity={op}>
-                <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={on ? groupColor(a.c.group) : C.line} strokeWidth={on ? 2 : 1.3} />
+              <g key={a.id + '|' + b.id + '|' + label} opacity={op}>
+                <path className={`mm-edge ${isNew ? 'mm-draw' : ''}`} d={d} style={{ d: `path("${d}")` }} pathLength={1} stroke={on ? groupColor(a.c.group) : C.line} strokeWidth={on ? 2 : 1.3} />
                 {label && (showAllLabels || on) && (
-                  <g transform={`translate(${mx},${my})`}>
+                  <g className="mm-gmove" transform={`translate(${mx},${my})`} style={{ transform: `translate(${mx}px, ${my}px)` }}>
                     <rect x={-lw / 2} y={-9} width={lw} height={18} rx={9} fill={C.panel} stroke={C.line} />
                     <text y={4} textAnchor="middle" fontSize={11} fill={C.text2}>{label}</text>
                   </g>
@@ -555,13 +725,15 @@ function GraphView({ map, C, sel, setSel, query }) {
             const selected = sel?.kind === 'character' && sel.name === n.id
             const op = nb ? (nb.has(n.id) ? 1 : C.dim) : 1
             return (
-              <g key={n.id} data-node className="mm-gnode" opacity={op} transform={`translate(${n.x},${n.y})`}
+              <g key={n.id} data-node className="mm-gnode mm-gmove" opacity={op} transform={`translate(${n.x},${n.y})`} style={{ transform: `translate(${n.x}px, ${n.y}px)` }}
                 onPointerDown={e => dragNode(e, n)} onPointerEnter={() => setHover(n.id)} onPointerLeave={() => setHover(null)}>
-                {(selected || isMatch(n.c)) && <circle r={n.r + 5} fill="none" stroke={selected ? col : C.match} strokeWidth={2.5} />}
-                <circle r={n.r} fill={col} stroke={C.panel} strokeWidth={2} />
-                <text y={n.r * 0.36} textAnchor="middle" fontSize={n.r * 0.95} fontWeight={600} fill="#fff">{n.id.slice(0, 1)}</text>
-                <text y={n.r + 16} textAnchor="middle" fontSize={n.c.role === '主角' ? 14 : 12.5} fontWeight={n.c.role === '次要' ? 400 : 600} fill={C.text}
-                  stroke={C.bg} strokeWidth={3} paintOrder="stroke">{n.id}</text>
+                <g className={graph.fresh.has(n.id) ? 'mm-pop' : undefined}>
+                  {(selected || isMatch(n.c)) && <circle r={n.r + 5} fill="none" stroke={selected ? col : C.match} strokeWidth={2.5} />}
+                  <circle r={n.r} fill={col} stroke={C.panel} strokeWidth={2} />
+                  <text y={n.r * 0.36} textAnchor="middle" fontSize={n.r * 0.95} fontWeight={600} fill="#fff">{n.id.slice(0, 1)}</text>
+                  <text y={n.r + 16} textAnchor="middle" fontSize={n.c.role === '主角' ? 14 : 12.5} fontWeight={n.c.role === '次要' ? 400 : 600} fill={C.text}
+                    stroke={C.bg} strokeWidth={3} paintOrder="stroke">{n.id}</text>
+                </g>
               </g>
             )
           })}
@@ -572,16 +744,16 @@ function GraphView({ map, C, sel, setSel, query }) {
           {groups.map(g => <span key={g}><i style={{ background: groupColor(g) }} />{g}</span>)}
         </div>
       )}
-      <Zoom pz={pz} onFit={() => pz.fitTo(bbox, 50, 1.2)} extra={
+      <Zoom pz={pz} onFit={() => pz.fitTo(bbox, 50, 1.2, true)} extra={
         <label className="mm-check" title="显示次要人物"><input type="checkbox" checked={minor} onChange={e => setMinor(e.target.checked)} />次要人物</label>
       } />
       <div className="mm-hint">悬停看关系 · 拖动人物调整位置 · 点击看详情</div>
     </div>
   )
-}
+})
 
 // ---------- 详情 ----------
-function Detail({ map, doc, sel, setSel, resolve, index, onLocate, record }) {
+function Detail({ map, doc, ranges: allRanges, sel, setSel, resolve, index, onLocate, record, live }) {
   const Link = ({ name }) => {
     const r = resolve(name)
     return r ? <button className="mm-link" onClick={() => setSel(r)}>{name}</button> : <span className="mm-plain">{name}</span>
@@ -599,7 +771,7 @@ function Detail({ map, doc, sel, setSel, resolve, index, onLocate, record }) {
     }}><Search size={13} />在书中查找“{name}”</button>
   )
   const ranges = chunks => {
-    const list = [...new Set((chunks || []).map(i => doc?.ranges?.[i]).filter(Boolean))]
+    const list = [...new Set((chunks || []).map(i => allRanges?.[i]).filter(Boolean))]
     return list.length ? list : null
   }
 
@@ -705,7 +877,7 @@ function Detail({ map, doc, sel, setSel, resolve, index, onLocate, record }) {
   if (!body) body = <div className="muted">这一项在最新的导图里已经没有了。</div>
   return (
     <aside className="mm-detail">
-      {sel && sel.kind !== 'book' && <button className="mm-back" onClick={() => setSel(null)}>← 全书概览</button>}
+      {sel && sel.kind !== 'book' && <button className="mm-back" onClick={() => setSel(null)}>{live ? '× 收起' : '← 全书概览'}</button>}
       {body}
     </aside>
   )
@@ -723,6 +895,8 @@ function standaloneSVG(svg, C) {
   clone.setAttribute('transform', `translate(${pad - bbox.x},${pad - bbox.y})`)
   clone.removeAttribute('data-bbox')
   clone.querySelectorAll('.mm-fold').forEach(el => { if (!el.querySelector('text')) el.remove() })
+  clone.querySelectorAll('[style]').forEach(el => el.removeAttribute('style'))
+  clone.querySelectorAll('[class]').forEach(el => el.removeAttribute('class'))
   const fontFamily = getComputedStyle(document.body).fontFamily.replace(/"/g, "'")
   const text = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" font-family="${fontFamily}">` +
     `<rect width="100%" height="100%" fill="${C.bg}"/>${new XMLSerializer().serializeToString(clone)}</svg>`
